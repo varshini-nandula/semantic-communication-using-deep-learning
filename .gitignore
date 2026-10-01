@@ -61,3 +61,6 @@ desktop.ini
 .idea/
 *.swp
 *.swo
+
+CONTEXT.MD
+.agents
