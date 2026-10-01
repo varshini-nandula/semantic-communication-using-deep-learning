@@ -2,6 +2,30 @@
 
 > **Verdict: Use the existing `UDeepSC_FSM` as the baseline. Do NOT build from scratch.**
 
+> [!CAUTION]
+> **Before reading further — resolve the speech gap first (Section 0 below).** Speech is a mandatory modality per the guide requirement, but the base repo has no speech *reconstruction* pipeline. This is the only issue that changes actual scope and timeline; everything else in this plan can be fixed incrementally.
+
+---
+
+## Section 0 — CRITICAL: Speech Modality Gap (Resolve Before Writing Code)
+
+The base repo (`UDeepSC_FSM`) does **not** have a standalone speech reconstruction task. Speech in the paper only appears bundled into the Multimodal Sentiment Analysis (MSA) task — never as standalone speech reconstruction. [CONTEXT.MD §4](file:///c:/Users/varsh/My%20Projects/Semantic%20Communication%20using%20Deep%20Learning/CONTEXT.MD) specifies speech as a full modality with its own reconstruction baseline (Stage 1).
+
+**Choose one of these three options before starting Phase 1:**
+
+| Option | What it means | Extra time | Trade-off |
+|---|---|---|---|
+| **A — Spectrogram reconstruction** (recommended) | Treat speech as a mel-spectrogram (2D image-like), encode with `SPTEncoder` (already in repo), add a spectrogram decoder, evaluate with PESQ/STOI or proxy PSNR | +1–2 weeks Phase 1 | Full 3-modality parity; Grad-CAM transfers directly from image pipeline |
+| **B — Speech via MSA classification** | Keep speech but evaluate it on the MSA classification task (already in repo). Speech reconstruction becomes stretch goal. | Minimal extra time; needs CMU-MOSEI (~2 GB) | Changes "reconstruction is primary task" framing — re-confirm with guide |
+| **C — Defer speech to Phase 2+** | Stage 1 baseline is image + text only. Speech enters for the first time during XAI diagnosis, not as a trained reconstruction baseline. | None in Phase 1 | Guide must explicitly accept this scope |
+
+> [!IMPORTANT]
+> **Option A is recommended.** `SPTEncoder` in `model_util.py` already uses the same ViT-style architecture as the image encoder, so Grad-CAM tooling transfers directly. The only new work is: a mel-spectrogram dataset (UrbanSound8K or LibriSpeech subset — both small and free) plus a spectrogram decoder. This keeps all three modalities in Stage 1 exactly as CONTEXT.MD §4 specifies, without changing the reconstruction framing.
+
+**Record your decision here and in [CONTEXT.MD §7](file:///c:/Users/varsh/My%20Projects/Semantic%20Communication%20using%20Deep%20Learning/CONTEXT.MD) before proceeding.**
+
+> Speech decision: _(fill in: Option A / B / C — and if A, which speech dataset)_
+
 ---
 
 ## Executive Decision: Fork, Don't Rebuild
@@ -27,43 +51,52 @@ The codebase has **hardcoded paths from the original authors' server** that must
 
 | File | Line | Issue |
 |---|---|---|
-| [`model.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model.py#L45) | 45 | `bert_ckpt = f"/Data1/zhangguangyi/..."` — hardcoded Linux path to BERT weights |
-| [`model_util.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L682) | 682 | Same hardcoded BERT path in `TextEncoder_FSM` |
-| [`model_util.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L900-L902) | 900–902 | `qam_mod(M)` runs at **import time** with a `print()` — side effect on every import |
-| [`datasets.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/datasets.py#L18) | 18 | `BertTokenizer.from_pretrained('bert-base-uncased')` — downloads at import |
-| [`utils.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/utils.py#L14) | 14 | `from torch._six import inf` — **removed in PyTorch ≥ 2.0**, must change to `math.inf` |
+| [`model.py`](file:///c:/Users/varsh/My%20Projects/Semantic%20Communication%20using%20Deep%20Learning/UDeepSC_FSM/model.py#L45) | 45 | `bert_ckpt = f"/Data1/zhangguangyi/..."` — hardcoded Linux path to BERT weights |
+| [`model_util.py`](file:///c:/Users/varsh/My%20Projects/Semantic%20Communication%20using%20Deep%20Learning/UDeepSC_FSM/model_util.py#L682) | 682 | Same hardcoded BERT path in `TextEncoder_FSM` |
+| [`model_util.py`](file:///c:/Users/varsh/My%20Projects/Semantic%20Communication%20using%20Deep%20Learning/UDeepSC_FSM/model_util.py#L900-L902) | 900–902 | `qam_mod(M)` runs at **import time** with a `print()` — side effect on every import |
+| [`datasets.py`](file:///c:/Users/varsh/My%20Projects/Semantic%20Communication%20using%20Deep%20Learning/UDeepSC_FSM/datasets.py#L18) | 18 | `BertTokenizer.from_pretrained('bert-base-uncased')` — downloads at import |
+| [`utils.py`](file:///c:/Users/varsh/My%20Projects/Semantic%20Communication%20using%20Deep%20Learning/UDeepSC_FSM/utils.py#L14) | 14 | `from torch._six import inf` — **removed in PyTorch ≥ 2.0**, must change to `math.inf` |
 | [`requirements.txt`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/requirements.txt) | — | `torch==1.8.0`, `pickle==4.0` — severely outdated, needs update |
 
 ---
 
 ## Phase Overview
 
+> [!NOTE]
+> **Revised total: ~13 weeks** (was ~9.5 weeks with zero slack). Additions: speech encoder build (+1.5w in Phase 1), Phase 3 padding (+1w), mandatory buffer (1.5w), and report/slides time (1w). Phase 4 is labelled stretch goal — do not schedule it until Phase 1–3 are producing results.
+
 ```mermaid
 gantt
-    title Project Implementation Timeline
+    title Project Implementation Timeline (Revised — includes speech & buffer)
     dateFormat  YYYY-MM-DD
     axisFormat  %b %d
 
     section Phase 1 - Environment & Baseline
-    Environment setup & path fixes           :p1a, 2026-10-02, 5d
-    Dataset acquisition                      :p1b, 2026-10-02, 4d
-    Baseline training verification           :p1c, after p1a, 7d
-    Baseline evaluation (all SNRs)           :p1d, after p1c, 3d
+    Env setup, path fixes, smoke test        :p1a, 2026-10-02, 5d
+    Dataset acquisition (CIFAR + SST-2)      :p1b, 2026-10-02, 4d
+    Baseline training verification (imgc)    :p1c, after p1a, 7d
+    Baseline SNR sweep evaluation            :p1d, after p1c, 3d
+    Speech encoder build (spectrogram-ViT)   :p1e, after p1c, 10d
 
     section Phase 2 - XAI Diagnosis
-    Grad-CAM on image encoder                :p2a, after p1d, 5d
-    Attention Rollout on text encoder        :p2b, after p1d, 4d
-    FastSHAP cross-modal                     :p2c, after p2a, 5d
+    Grad-CAM on image & speech encoders      :p2a, after p1e, 6d
+    Attention Rollout on text encoder        :p2b, after p1e, 4d
+    Shapley cross-modal allocation           :p2c, after p2a, 5d
     Faithfulness validation                  :p2d, after p2c, 4d
 
     section Phase 3 - XAI-Driven Replacement
-    XAI Feature Selector module              :p3a, after p2d, 7d
-    Retrain with XAI selector                :p3b, after p3a, 7d
-    Selective retransmission                  :p3c, after p3b, 5d
-    Comparative evaluation                   :p3d, after p3c, 5d
+    pre-FSM early-exit mode (encoder mod)    :p3a, after p2d, 3d
+    XAI Feature Selector module              :p3b, after p3a, 7d
+    Retrain with XAI selector                :p3c, after p3b, 10d
+    Selective retransmission                  :p3d, after p3c, 5d
+    Comparative evaluation                   :p3e, after p3d, 7d
 
-    section Phase 4 - MATLAB & Hardware
-    Simulink channel model                   :p4a, after p3d, 5d
+    section Buffer & Report
+    Integration & debugging buffer           :buf, after p3e, 10d
+    Report & slides polish                   :rep, after buf, 7d
+
+    section Phase 4 - MATLAB & Hardware (STRETCH GOAL)
+    Simulink channel model                   :p4a, after rep, 5d
     App Designer GUI                         :p4b, after p4a, 4d
     ESP32 hardware setup                     :p4c, after p4a, 5d
     Integration testing                      :p4d, after p4b, 3d
@@ -123,7 +156,7 @@ python -c "from transformers import BertModel; BertModel.from_pretrained('prajjw
 
 Then update the hardcoded path in two locations:
 
-**In [`model.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model.py#L45), line 45:**
+**In [`model.py`](file:///c:/Users/varsh/My%20Projects/Semantic%20Communication%20using%20Deep%20Learning/UDeepSC_FSM/model.py#L45), line 45:**
 ```python
 # BEFORE (broken):
 bert_ckpt = f"/Data1/zhangguangyi/SemanRes2/JSACCode/UDeepSC_Base/pretrained_models/bert-{mode}"
@@ -132,13 +165,13 @@ bert_ckpt = f"/Data1/zhangguangyi/SemanRes2/JSACCode/UDeepSC_Base/pretrained_mod
 bert_ckpt = f"prajjwal1/bert-{mode}"
 ```
 
-**In [`model_util.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L682), line 682:**
+**In [`model_util.py`](file:///c:/Users/varsh/My%20Projects/Semantic%20Communication%20using%20Deep%20Learning/UDeepSC_FSM/model_util.py#L682), line 682:**
 ```python
 # Same fix:
 bert_ckpt = f"prajjwal1/bert-{mode}"
 ```
 
-**3b. Fix deprecated PyTorch import in [`utils.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/utils.py#L14), line 14:**
+**3b. Fix deprecated PyTorch import in [`utils.py`](file:///c:/Users/varsh/My%20Projects/Semantic%20Communication%20using%20Deep%20Learning/UDeepSC_FSM/utils.py#L14), line 14:**
 ```python
 # BEFORE:
 from torch._six import inf
@@ -147,7 +180,7 @@ from torch._six import inf
 from math import inf
 ```
 
-**3c. Fix import-time side effects in [`model_util.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L897-L902), lines 897–902:**
+**3c. Fix import-time side effects in [`model_util.py`](file:///c:/Users/varsh/My%20Projects/Semantic%20Communication%20using%20Deep%20Learning/UDeepSC_FSM/model_util.py#L897-L902), lines 897–902:**
 ```python
 # BEFORE (runs at import):
 M = 16
@@ -183,12 +216,15 @@ Then update `commun_sim()` to call `_get_modulation_tables()` instead of using g
 
 ### 1.3 Scoped Task Selection
 
-Per your project design (reconstruction-focused, not all 6 tasks), modify `ta_sel` in [`udeepsc_main.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/udeepsc_main.py#L50):
+Per your project design (reconstruction-focused, not all 6 tasks), modify `ta_sel` in [`udeepsc_main.py`](file:///c:/Users/varsh/My%20Projects/Semantic%20Communication%20using%20Deep%20Learning/UDeepSC_FSM/udeepsc_main.py#L50):
 
 ```python
-# Full paper uses: ta_sel = ['imgc', 'vqa', 'textc']
-# Your project scopes to reconstruction:
-ta_sel = ['imgr', 'textr']
+# Full paper default: ta_sel = ['imgc', 'vqa', 'textc']
+# Your project scope — reconstruction, all three modalities:
+# NOTE: 'sper' requires the speech encoder build from Phase 1 (Section 0, Option A).
+# Start with image + text, add speech once SPTEncoder + dataset are verified.
+ta_sel = ['imgr', 'textr']            # Week 1 — before speech encoder is ready
+# ta_sel = ['imgr', 'textr', 'sper']  # Week 2+ — once speech pipeline is verified
 ```
 
 But first, verify the baseline works with the original `ta_sel` to confirm nothing is broken.
@@ -198,12 +234,12 @@ But first, verify the baseline works with the original `ta_sel` to confirm nothi
 #### Training Command (Windows / PowerShell)
 
 ```powershell
-cd c:\Users\varsh\My Projects\t-udeepsc\UDeepSC_FSM
+cd "c:\Users\varsh\My Projects\Semantic Communication using Deep Learning\UDeepSC_FSM"
 
 python udeepsc_main.py `
     --model UDeepSC_model `
     --output_dir ckpt_baseline `
-    --batch_size 32 `
+    --batch_size 16 `
     --input_size 224 `
     --lr 6e-5 `
     --epochs 100 `
@@ -213,8 +249,7 @@ python udeepsc_main.py `
 ```
 
 > [!NOTE]
-> Use backtick `` ` `` for line continuation in PowerShell, not `\`.
-> Reduce `batch_size` if you hit OOM. The original used 40 on a server GPU.
+> `batch_size` set to 16 (paper used 40 on a multi-GPU server). Reduce to 8 if you hit OOM; use gradient accumulation (`--update_freq 2`) to compensate. Use backtick `` ` `` for PowerShell line continuation, not `\`.
 
 #### Verification Checklist
 
@@ -251,11 +286,13 @@ for snr in snr_range:
 
 ### Phase 1 Deliverables
 
-- [ ] Working conda environment with all dependencies
-- [ ] All hardcoded paths fixed
-- [ ] Baseline model trained on imgc/imgr/textc tasks
-- [ ] Evaluation metrics logged across SNR = [-6, -4, ..., 12] dB
-- [ ] Results table saved (this becomes your "black-box FSM" comparison column)
+- [ ] **Speech decision recorded** in CONTEXT.MD §7 (Option A / B / C from Section 0)
+- [ ] Working conda environment with all dependencies installed
+- [ ] All 6 hardcoded path/import issues fixed and verified (`python -c "import model"` passes)
+- [ ] Baseline model trained on `imgr` + `textr` tasks
+- [ ] Speech encoder pipeline verified (if Option A: `SPTEncoder` runs on mel-spectrogram input without errors)
+- [ ] Evaluation metrics logged across SNR = [-6, -4, ..., 12] dB and saved to CSV
+- [ ] Results CSV is your "black-box FSM" comparison column — keep it; every later phase is measured against it
 
 ---
 
@@ -265,7 +302,7 @@ for snr in snr_range:
 
 ### 2.1 Understand the FSM Architecture First
 
-The FSM you'll be diagnosing lives in [`model_util.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L851-L881):
+The FSM you'll be diagnosing lives in [`model_util.py`](file:///c:/Users/varsh/My%20Projects/Semantic%20Communication%20using%20Deep%20Learning/UDeepSC_FSM/model_util.py#L851-L881):
 
 ```
 FSM Pipeline (per modality encoder):
@@ -288,11 +325,11 @@ Key classes and where they live:
 
 | Component | Class | Location |
 |---|---|---|
-| Mask generator MLP | `mask_gen` | [`model_util.py:793–817`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L793-L817) |
-| FSM wrapper | `FSM` | [`model_util.py:851–881`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L851-L881) |
-| Compression ratio function | `rho_function` | [`model_util.py:835–848`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L835-L848) |
-| Image encoder with FSM | `ViTEncoder_FSM` | [`model_util.py:539–669`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L539-L669) |
-| Text encoder with FSM | `TextEncoder_FSM` | [`model_util.py:673–790`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L673-L790) |
+| Mask generator MLP | `mask_gen` | [`model_util.py:793–817`](file:///c:/Users/varsh/My%20Projects/Semantic%20Communication%20using%20Deep%20Learning/UDeepSC_FSM/model_util.py#L793-L817) |
+| FSM wrapper | `FSM` | [`model_util.py:851–881`](file:///c:/Users/varsh/My%20Projects/Semantic%20Communication%20using%20Deep%20Learning/UDeepSC_FSM/model_util.py#L851-L881) |
+| Compression ratio function | `rho_function` | [`model_util.py:835–848`](file:///c:/Users/varsh/My%20Projects/Semantic%20Communication%20using%20Deep%20Learning/UDeepSC_FSM/model_util.py#L835-L848) |
+| Image encoder with FSM | `ViTEncoder_FSM` | [`model_util.py:539–669`](file:///c:/Users/varsh/My%20Projects/Semantic%20Communication%20using%20Deep%20Learning/UDeepSC_FSM/model_util.py#L539-L669) |
+| Text encoder with FSM | `TextEncoder_FSM` | [`model_util.py:673–790`](file:///c:/Users/varsh/My%20Projects/Semantic%20Communication%20using%20Deep%20Learning/UDeepSC_FSM/model_util.py#L673-L790) |
 
 ### 2.2 Grad-CAM for Image Encoder
 
@@ -542,12 +579,22 @@ class FastSHAPCrossModal:
     
     def compute_shapley_exact(self, coalition_values):
         """
-        Compute exact Shapley values from coalition values.
-        For M=3 modalities, this is tractable (8 coalitions).
+        Compute EXACT Shapley values via brute force over all 2^M coalitions.
+        For M=3, this is only 8 evaluations — fully tractable.
+
+        These are ground-truth labels. If you later add a lightweight learned
+        approximator (a small MLP trained on these labels for fast inference),
+        call that component a 'Shapley approximator' — NOT FastSHAP — in your
+        report, to be precise. FastSHAP (Jethani et al. 2021) uses a specific
+        efficiency loss that we do not implement here.
+
+        BUG FIX: Original used np.math.factorial — deprecated since NumPy 1.25
+        and removed in NumPy 2.0. Use stdlib math.factorial instead.
         """
+        from math import factorial
         M = self.num_modalities
         shapley = np.zeros(M)
-        
+
         for i in range(M):
             for coalition in product([0, 1], repeat=M):
                 if coalition[i] == 1:
@@ -555,21 +602,21 @@ class FastSHAPCrossModal:
                     without_i = list(coalition)
                     without_i[i] = 0
                     without_i = tuple(without_i)
-                    
+
                     # Marginal contribution
                     s = sum(without_i)
-                    weight = (np.math.factorial(s) * np.math.factorial(M - s - 1)) / np.math.factorial(M)
+                    weight = (factorial(s) * factorial(M - s - 1)) / factorial(M)
                     marginal = coalition_values[coalition] - coalition_values[without_i]
                     shapley[i] += weight * marginal
-        
-        # Normalize to proportions
+
+        # Normalize to proportions (only keep positive contributions)
         shapley_positive = np.maximum(shapley, 0)
         total = shapley_positive.sum()
         if total > 0:
             shapley_positive = shapley_positive / total
         else:
             shapley_positive = np.ones(M) / M
-        
+
         return shapley_positive  # [img_share, text_share, speech_share]
 ```
 
@@ -598,47 +645,58 @@ class FaithfulnessTest:
         self.model = model
         self.criterion = criterion
     
-    def deletion_test(self, features, importance_scores, 
+    def deletion_test(self, features, importance_scores,
                       ta_perform, targets, n_steps=10):
         """
         features: [B, N, D]
         importance_scores: [B, N]
         Returns: list of performance values as features are removed
+
+        LIMITATION (acknowledge in report):
+        The choice of what to replace removed features with affects results.
+        Zeroing (= 0) is common but introduces distribution shift — the decoder
+        was never trained on zero-padded features. This is a known critique
+        (Petsiuk et al., RISE 2018). We use mean-feature replacement as a
+        less distribution-shifting baseline. If a panelist raises this, cite
+        Petsiuk et al. and note it as a known trade-off in deletion testing.
         """
         B, N, D = features.shape
         sorted_indices = torch.argsort(importance_scores, dim=1, descending=True)
-        
+
+        # Use training-mean replacement (less distribution-shifting than zeros)
+        feature_mean = features.mean(dim=[0, 1], keepdim=True).expand(B, N, D)
+
         performances = []
         step_size = max(1, N // n_steps)
-        
+
         for k in range(0, N + 1, step_size):
             masked_features = features.clone()
             if k > 0:
-                # Zero out the top-k most important features
+                # Replace top-k most important features with their mean value
                 for b in range(B):
                     indices_to_remove = sorted_indices[b, :k]
-                    masked_features[b, indices_to_remove] = 0
-            
+                    masked_features[b, indices_to_remove] = feature_mean[b, indices_to_remove]
+
             with torch.no_grad():
                 output = self.model.decode(masked_features, ta_perform)
                 perf = self._compute_metric(output, targets, ta_perform)
             performances.append(perf)
-        
+
         return performances
-    
+
     def deletion_random_baseline(self, features, ta_perform, targets, n_steps=10, n_runs=5):
-        """Random deletion ordering as control."""
+        """Random deletion ordering as control. Average over n_runs for stability."""
         all_perfs = []
         B, N, D = features.shape
-        
+
         for _ in range(n_runs):
-            random_order = torch.randperm(N).unsqueeze(0).expand(B, -1)
-            perfs = self.deletion_test(features, 
-                                        torch.randn(B, N),  # random scores
+            perfs = self.deletion_test(features,
+                                        torch.randn(B, N),  # random importance scores
                                         ta_perform, targets, n_steps)
             all_perfs.append(perfs)
-        
+
         return np.mean(all_perfs, axis=0)
+
     
     def plot_faithfulness(self, xai_deletion, random_deletion, metric_name='PSNR'):
         """Plot deletion curves showing XAI scores are meaningful."""
