@@ -7,10 +7,16 @@ import torch.utils.data as data
 
 from loguru import logger
 from torch.utils.data import Dataset
-from pytorch_transformers import BertTokenizer
+from transformers import BertTokenizer
 #####################################################
 
-sst = pytreebank.load_sst()
+_sst_data = None
+def get_sst_data():
+    global _sst_data
+    if _sst_data is None:
+        _sst_data = pytreebank.load_sst()
+    return _sst_data
+
 def rpad(array, n=70):
     """Right padding."""
     current_len = len(array)
@@ -34,10 +40,11 @@ class SST_CR(Dataset):
         tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
         logger.info("Loading SST")
         
+        sst_data = get_sst_data()
         if train:
-            self.sst = sst["train"]
+            self.sst = sst_data["train"]
         else:
-            self.sst = sst["test"]
+            self.sst = sst_data["test"]
         self.if_class = if_class
         if root and binary:
             self.data = [(rpad(tokenizer.encode("[CLS] " + tree.to_lines()[0] + " [SEP]"), n=66),

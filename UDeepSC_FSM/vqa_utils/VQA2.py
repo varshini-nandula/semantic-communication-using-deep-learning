@@ -5,7 +5,7 @@ import os, torch, random
 from .vqa_config import path
 from types import MethodType
 from torch.utils.data import Dataset
-from pytorch_transformers import BertTokenizer
+from transformers import BertTokenizer
 from .data_utils import proc_img_feat, proc_ans, ans_stat, rpad
 from .data_utils import img_feat_path_load, img_feat_load, ques_load
 

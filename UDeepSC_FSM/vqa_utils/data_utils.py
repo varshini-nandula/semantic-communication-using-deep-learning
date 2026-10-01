@@ -2,7 +2,7 @@ import numpy as np
 import random, re, json
 
 from .ans_punct import prep_ans
-from pytorch_transformers import BertTokenizer
+from transformers import BertTokenizer
 
 ###################   Initialization
 

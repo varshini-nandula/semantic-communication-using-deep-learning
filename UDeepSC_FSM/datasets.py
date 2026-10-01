@@ -15,7 +15,13 @@ from torchvision import datasets, transforms
 from msa_utils import PAD, Config_MSA, MSA
 # from pytorch_transformers import BertTokenizer
 from torch.utils.data.sampler import RandomSampler
-bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+_bert_tokenizer = None
+
+def get_bert_tokenizer():
+    global _bert_tokenizer
+    if _bert_tokenizer is None:
+        _bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    return _bert_tokenizer
 
 class BatchSchedulerSampler(torch.utils.data.sampler.Sampler):
     """
@@ -205,10 +211,11 @@ def collate_fn(batch):
     # print(texts.permute(1,0))
     SENT_LEN = texts.size(0)
     # Create bert indices using tokenizer
+    tokenizer = get_bert_tokenizer()
     bert_details = []
     for sample in batch:
         text = " ".join(sample[0][3])
-        encoded_bert_sent = bert_tokenizer.encode_plus(
+        encoded_bert_sent = tokenizer.encode_plus(
             text, max_length=SENT_LEN+2, add_special_tokens=True, pad_to_max_length=True,truncation=True)
         bert_details.append(encoded_bert_sent)
 

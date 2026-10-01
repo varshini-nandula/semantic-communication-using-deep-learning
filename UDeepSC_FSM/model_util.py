@@ -679,9 +679,13 @@ class TextEncoder_FSM(nn.Module):
                  use_learnable_pos_emb=False, mode='tiny', num_FSM=2):
         super().__init__()
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
-        bert_ckpt = f"/Data1/zhangguangyi/SemanRes2/JSACCode/UDeepSC_Base/pretrained_models/bert-{mode}"
-        # self.embeddings = BertEmbeddings( bert_ckpt)
-        temp = BertModel.from_pretrained(bert_ckpt)
+        bert_model_map = {
+            'tiny': 'prajjwal1/bert-tiny',
+            'small': 'prajjwal1/bert-small',
+            'base': 'bert-base-uncased'
+        }
+        bert_name_or_path = bert_model_map.get(mode, mode if (isinstance(mode, str) and os.path.exists(mode)) else f"bert-{mode}")
+        temp = BertModel.from_pretrained(bert_name_or_path)
         self.embeddings = temp.embeddings
         temp = None
         self.depth = depth
@@ -895,11 +899,9 @@ def binaryarray_to_array(binary_array, num_bits):
 
 
 # Settings
-M =16  # modulation order
-        # signal-to-noise ratio
+M = 16  # modulation order
 channel = 'awgn'  # channel type
 mapping_table, demapping_table = qam_mod(M)
-print(mapping_table)
 
 def commun_sim(data_dec, snr=18, quan_bits=8):
     data_dec = data_dec.cpu().numpy().flatten()
