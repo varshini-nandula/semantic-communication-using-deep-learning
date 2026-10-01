@@ -1,0 +1,1516 @@
+# Explainable Multimodal Semantic Communication — Implementation Plan
+
+> **Verdict: Use the existing `UDeepSC_FSM` as the baseline. Do NOT build from scratch.**
+
+---
+
+## Executive Decision: Fork, Don't Rebuild
+
+After a thorough audit of every file in the repository, the answer is unambiguous:
+
+| Factor | Build from scratch | Fork `UDeepSC_FSM` ✅ |
+|---|---|---|
+| **Encoders** (ViT, BERT, Speech) | ~2 weeks to rewrite + debug | Already implemented and tested |
+| **FSM (Feature Selection Module)** | Need to reverse-engineer the paper | Fully implemented: `mask_gen` → Gumbel-Softmax → `batch_index_select` |
+| **VQ Codebook + Digital Transmission** | Complex; VQ-VAE + QAM modulation | Working: `VectorQuantizer` + `commun_sim()` with 16-QAM |
+| **Channel Models** | Straightforward but tedious | AWGN, Rayleigh, Rician all implemented |
+| **Training Loop** | Multi-task sampler is non-trivial | `train_epoch_uni` handles random task sampling |
+| **Datasets** | CIFAR, SST2, VQA2, MOSEI/MOSI | Loaders, transforms, collate functions all present |
+| **Evaluation** | PSNR, BLEU, accuracy metrics | `evaluate()`, `evaluate_vqa()`, `evaluate_msa()` exist |
+| **Time to first result** | 4–6 weeks | 1–2 weeks (fix paths, verify training) |
+
+**The existing `UDeepSC_FSM` directory IS your Stage 1 baseline.** Your novel contributions (Stages 2 & 3) are layers you add *on top of* this codebase, not a replacement of it.
+
+### What Needs Fixing Before It Runs
+
+The codebase has **hardcoded paths from the original authors' server** that must be changed:
+
+| File | Line | Issue |
+|---|---|---|
+| [`model.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model.py#L45) | 45 | `bert_ckpt = f"/Data1/zhangguangyi/..."` — hardcoded Linux path to BERT weights |
+| [`model_util.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L682) | 682 | Same hardcoded BERT path in `TextEncoder_FSM` |
+| [`model_util.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L900-L902) | 900–902 | `qam_mod(M)` runs at **import time** with a `print()` — side effect on every import |
+| [`datasets.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/datasets.py#L18) | 18 | `BertTokenizer.from_pretrained('bert-base-uncased')` — downloads at import |
+| [`utils.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/utils.py#L14) | 14 | `from torch._six import inf` — **removed in PyTorch ≥ 2.0**, must change to `math.inf` |
+| [`requirements.txt`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/requirements.txt) | — | `torch==1.8.0`, `pickle==4.0` — severely outdated, needs update |
+
+---
+
+## Phase Overview
+
+```mermaid
+gantt
+    title Project Implementation Timeline
+    dateFormat  YYYY-MM-DD
+    axisFormat  %b %d
+
+    section Phase 1 - Environment & Baseline
+    Environment setup & path fixes           :p1a, 2026-10-02, 5d
+    Dataset acquisition                      :p1b, 2026-10-02, 4d
+    Baseline training verification           :p1c, after p1a, 7d
+    Baseline evaluation (all SNRs)           :p1d, after p1c, 3d
+
+    section Phase 2 - XAI Diagnosis
+    Grad-CAM on image encoder                :p2a, after p1d, 5d
+    Attention Rollout on text encoder        :p2b, after p1d, 4d
+    FastSHAP cross-modal                     :p2c, after p2a, 5d
+    Faithfulness validation                  :p2d, after p2c, 4d
+
+    section Phase 3 - XAI-Driven Replacement
+    XAI Feature Selector module              :p3a, after p2d, 7d
+    Retrain with XAI selector                :p3b, after p3a, 7d
+    Selective retransmission                  :p3c, after p3b, 5d
+    Comparative evaluation                   :p3d, after p3c, 5d
+
+    section Phase 4 - MATLAB & Hardware
+    Simulink channel model                   :p4a, after p3d, 5d
+    App Designer GUI                         :p4b, after p4a, 4d
+    ESP32 hardware setup                     :p4c, after p4a, 5d
+    Integration testing                      :p4d, after p4b, 3d
+```
+
+---
+
+## Phase 1 — Environment Setup & Baseline Verification
+
+> **Goal:** Get the existing `UDeepSC_FSM` code running end-to-end on your machine, producing the same metrics the paper reports. This is your Stage 1 safety-net baseline.
+
+### 1.1 Environment Setup
+
+#### Step 1: Create a Clean Conda Environment
+
+```powershell
+conda create -n xai_semcom python=3.10 -y
+conda activate xai_semcom
+```
+
+#### Step 2: Install Dependencies (Updated)
+
+Create a new `requirements_updated.txt`:
+
+```
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+transformers>=4.30.0
+timm==0.6.13
+nltk>=3.8
+einops>=0.6.0
+pytorch-msssim>=1.0.0
+scikit-learn>=1.2.0
+thop>=0.1.1
+numpy>=1.24.0
+pandas>=2.0.0
+compressai>=1.2.0
+scipy>=1.10.0
+matplotlib>=3.7.0
+```
+
+> [!WARNING]
+> Do NOT use `torch==1.8.0`. That version is incompatible with modern CUDA drivers and `transformers>=4.26`. Use `torch>=2.0.0`.
+
+> [!IMPORTANT]
+> The original `requirements.txt` lists `pickle==4.0` — this is incorrect. `pickle` is a built-in Python module and should never be pip-installed. Remove it.
+
+#### Step 3: Fix Hardcoded Paths
+
+**3a. BERT model download:**
+
+```powershell
+# Download bert-small from HuggingFace (used by the model)
+python -c "from transformers import BertModel; BertModel.from_pretrained('prajjwal1/bert-small')"
+```
+
+Then update the hardcoded path in two locations:
+
+**In [`model.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model.py#L45), line 45:**
+```python
+# BEFORE (broken):
+bert_ckpt = f"/Data1/zhangguangyi/SemanRes2/JSACCode/UDeepSC_Base/pretrained_models/bert-{mode}"
+
+# AFTER:
+bert_ckpt = f"prajjwal1/bert-{mode}"
+```
+
+**In [`model_util.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L682), line 682:**
+```python
+# Same fix:
+bert_ckpt = f"prajjwal1/bert-{mode}"
+```
+
+**3b. Fix deprecated PyTorch import in [`utils.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/utils.py#L14), line 14:**
+```python
+# BEFORE:
+from torch._six import inf
+
+# AFTER:
+from math import inf
+```
+
+**3c. Fix import-time side effects in [`model_util.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L897-L902), lines 897–902:**
+```python
+# BEFORE (runs at import):
+M = 16
+channel = 'awgn'
+mapping_table, demapping_table = qam_mod(M)
+print(mapping_table)
+
+# AFTER (lazy initialization):
+_M = 16
+_mapping_table = None
+_demapping_table = None
+
+def _get_modulation_tables():
+    global _mapping_table, _demapping_table
+    if _mapping_table is None:
+        _mapping_table, _demapping_table = qam_mod(_M)
+    return _mapping_table, _demapping_table
+```
+
+Then update `commun_sim()` to call `_get_modulation_tables()` instead of using globals.
+
+### 1.2 Dataset Acquisition
+
+| Dataset | Task | Size | How to Get |
+|---|---|---|---|
+| **CIFAR-10** | Image classification/reconstruction | ~170MB | Auto-downloads via `torchvision` |
+| **SST-2** | Text classification/reconstruction | ~10MB | Auto-downloads via `pytreebank` |
+| **CMU-MOSEI / CMU-MOSI** | Multimodal sentiment analysis | ~2GB | [Google Drive link](https://drive.google.com/drive/folders/1IBwWNH0XjPnZWaAlP1U2tIJH6Rb3noMI) → place in `./data/msadata` |
+| **VQAv2** | Visual Question Answering | ~30GB | [OneDrive link](https://awma1-my.sharepoint.com/:f:/g/personal/yuz_l0_tn/EsfBlbmK1QZFhCOFpr4c5HUBzUV0aH2h1McnPG1jWAxytQ) — **defer until needed** |
+
+> [!TIP]
+> **Start with CIFAR-10 and SST-2 only.** These auto-download and let you verify the pipeline in minutes. VQA and MSA datasets are huge and only needed for the full paper's scope. Your project scopes to **reconstruction** as the primary task — CIFAR + SST are sufficient for the core contribution.
+
+### 1.3 Scoped Task Selection
+
+Per your project design (reconstruction-focused, not all 6 tasks), modify `ta_sel` in [`udeepsc_main.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/udeepsc_main.py#L50):
+
+```python
+# Full paper uses: ta_sel = ['imgc', 'vqa', 'textc']
+# Your project scopes to reconstruction:
+ta_sel = ['imgr', 'textr']
+```
+
+But first, verify the baseline works with the original `ta_sel` to confirm nothing is broken.
+
+### 1.4 Baseline Training & Verification
+
+#### Training Command (Windows / PowerShell)
+
+```powershell
+cd c:\Users\varsh\My Projects\t-udeepsc\UDeepSC_FSM
+
+python udeepsc_main.py `
+    --model UDeepSC_model `
+    --output_dir ckpt_baseline `
+    --batch_size 32 `
+    --input_size 224 `
+    --lr 6e-5 `
+    --epochs 100 `
+    --opt_betas 0.95 0.99 `
+    --save_freq 10 `
+    --ta_perform imgc
+```
+
+> [!NOTE]
+> Use backtick `` ` `` for line continuation in PowerShell, not `\`.
+> Reduce `batch_size` if you hit OOM. The original used 40 on a server GPU.
+
+#### Verification Checklist
+
+- [ ] Training starts without import errors
+- [ ] Loss decreases over first 5 epochs
+- [ ] `--eval` mode produces sensible accuracy/PSNR
+- [ ] Checkpoint saves to `ckpt_baseline/`
+
+#### Expected Baseline Metrics (from paper, Table II & III)
+
+| Task | Metric | Expected @ SNR=12dB |
+|---|---|---|
+| Image Classification (imgc) | Accuracy | ~92% (CIFAR-10) |
+| Image Reconstruction (imgr) | PSNR | ~24 dB |
+| Text Classification (textc) | Accuracy | ~82% |
+| Text Reconstruction (textr) | BLEU | ~0.85 |
+
+### 1.5 Baseline Evaluation Across SNR Range
+
+```python
+# Create: evaluate_snr_sweep.py
+import torch
+import numpy as np
+
+# After loading trained model...
+snr_range = np.arange(-6, 14, 2)  # [-6, -4, ..., 12] dB
+for snr in snr_range:
+    test_snr = torch.FloatTensor([snr])
+    # Run evaluation with this SNR
+    stats = evaluate(ta_perform='imgr', net=model, dataloader=val_loader,
+                     device=device, criterion=criterion, test_snr=snr)
+    print(f"SNR={snr}dB → PSNR={stats['psnr']:.2f}dB")
+```
+
+### Phase 1 Deliverables
+
+- [ ] Working conda environment with all dependencies
+- [ ] All hardcoded paths fixed
+- [ ] Baseline model trained on imgc/imgr/textc tasks
+- [ ] Evaluation metrics logged across SNR = [-6, -4, ..., 12] dB
+- [ ] Results table saved (this becomes your "black-box FSM" comparison column)
+
+---
+
+## Phase 2 — XAI Diagnosis (Apply XAI to the Black Box)
+
+> **Goal:** Apply explainability methods to the *trained* baseline FSM to understand what it's doing, before replacing it. This produces the diagnostic evidence.
+
+### 2.1 Understand the FSM Architecture First
+
+The FSM you'll be diagnosing lives in [`model_util.py`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L851-L881):
+
+```
+FSM Pipeline (per modality encoder):
+  input_feature [B, N, D]
+       │
+  mask_gen (MLP network)
+       │ outputs logits [B, N, 2] (keep/drop probabilities)
+       │
+  Gumbel-Softmax (hard=True during training)
+       │ produces binary mask curr_m [B, N, 1]
+       │
+  (inference only) argsort by prob_kept → keep top-K
+       │ K = round(mask_num × rho)
+       │ rho = learned function of noise_std
+       │
+  batch_index_select → pruned feature set
+```
+
+Key classes and where they live:
+
+| Component | Class | Location |
+|---|---|---|
+| Mask generator MLP | `mask_gen` | [`model_util.py:793–817`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L793-L817) |
+| FSM wrapper | `FSM` | [`model_util.py:851–881`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L851-L881) |
+| Compression ratio function | `rho_function` | [`model_util.py:835–848`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L835-L848) |
+| Image encoder with FSM | `ViTEncoder_FSM` | [`model_util.py:539–669`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L539-L669) |
+| Text encoder with FSM | `TextEncoder_FSM` | [`model_util.py:673–790`](file:///c:/Users/varsh/My%20Projects/t-udeepsc/UDeepSC_FSM/model_util.py#L673-L790) |
+
+### 2.2 Grad-CAM for Image Encoder
+
+**What it does:** Computes per-patch importance by backpropagating gradients from the reconstruction loss to a chosen encoder layer's activations, producing a spatial heatmap.
+
+**Target layer:** The last encoder block *before* the FSM kicks in. In `ViTEncoder_FSM.forward()`, the FSM starts at block `depth - num_FSM`. So the target is block `depth - num_FSM - 1` (i.e., `self.blocks[3]` for the default 6-block image encoder with 2 FSM stages).
+
+```python
+# Create: xai/grad_cam_image.py
+
+import torch
+import torch.nn.functional as F
+import numpy as np
+import matplotlib.pyplot as plt
+
+class GradCAMImageEncoder:
+    """
+    Grad-CAM for ViTEncoder_FSM.
+    Hooks into the last pre-FSM encoder block to capture
+    activations and gradients.
+    """
+    def __init__(self, model, target_layer_index=None):
+        self.model = model
+        self.activations = None
+        self.gradients = None
+        
+        # Default: last block before FSM
+        img_encoder = model.img_encoder
+        if target_layer_index is None:
+            target_layer_index = img_encoder.depth - img_encoder.num_FSM - 1
+        
+        target_block = img_encoder.blocks[target_layer_index]
+        
+        # Register hooks
+        target_block.register_forward_hook(self._save_activation)
+        target_block.register_full_backward_hook(self._save_gradient)
+    
+    def _save_activation(self, module, input, output):
+        self.activations = output.detach()
+    
+    def _save_gradient(self, module, grad_input, grad_output):
+        self.gradients = grad_output[0].detach()
+    
+    def compute(self, img, ta_perform='imgr', criterion=None, targets=None):
+        """
+        Returns per-patch importance scores [B, N_patches].
+        """
+        self.model.zero_grad()
+        
+        # Forward pass (need gradients, so can't use @torch.no_grad)
+        outputs = self.model(img=img, ta_perform=ta_perform)
+        if isinstance(outputs, tuple):
+            logits = outputs[0]
+        else:
+            logits = outputs['outputs']
+        
+        # Compute loss for backprop
+        if criterion is not None and targets is not None:
+            loss = criterion(logits, targets)
+        else:
+            # For reconstruction: use the output norm as proxy
+            loss = logits.norm()
+        
+        loss.backward(retain_graph=True)
+        
+        # Grad-CAM computation
+        # activations: [B, N+2, D] (cls + patches + task_embed)
+        # gradients:   [B, N+2, D]
+        
+        # Global average pooling of gradients over feature dim
+        weights = self.gradients.mean(dim=-1)  # [B, N+2]
+        
+        # Weighted combination
+        cam = (weights.unsqueeze(-1) * self.activations).sum(dim=-1)  # [B, N+2]
+        cam = F.relu(cam)  # Only positive contributions
+        
+        # Remove cls token and task embedding (first and last tokens)
+        cam_patches = cam[:, 1:-1]  # [B, N_patches]
+        
+        # Normalize per sample
+        cam_min = cam_patches.min(dim=1, keepdim=True)[0]
+        cam_max = cam_patches.max(dim=1, keepdim=True)[0]
+        cam_patches = (cam_patches - cam_min) / (cam_max - cam_min + 1e-8)
+        
+        return cam_patches  # [B, N_patches], values in [0, 1]
+    
+    def visualize(self, cam_patches, img, patch_size=32, img_size=224):
+        """Overlay Grad-CAM heatmap on the original image."""
+        n_patches_side = img_size // patch_size  # 7 for 224/32
+        
+        cam_2d = cam_patches[0].reshape(n_patches_side, n_patches_side)
+        cam_2d = cam_2d.cpu().numpy()
+        
+        # Upsample to image size
+        cam_upsampled = np.kron(cam_2d, np.ones((patch_size, patch_size)))
+        
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        
+        # Original image
+        img_np = img[0].permute(1, 2, 0).cpu().numpy()
+        axes[0].imshow(img_np)
+        axes[0].set_title('Original Image')
+        
+        # Grad-CAM heatmap
+        axes[1].imshow(cam_upsampled, cmap='jet')
+        axes[1].set_title('Grad-CAM Heatmap')
+        
+        # Overlay
+        axes[2].imshow(img_np)
+        axes[2].imshow(cam_upsampled, cmap='jet', alpha=0.4)
+        axes[2].set_title('Overlay')
+        
+        plt.tight_layout()
+        return fig
+```
+
+### 2.3 Attention Rollout for Text Encoder
+
+**What it does:** Multiplies attention matrices across all Transformer layers to get per-token importance (how much each input token contributes to the output).
+
+```python
+# Create: xai/attention_rollout_text.py
+
+import torch
+import numpy as np
+
+class AttentionRolloutText:
+    """
+    Attention Rollout for TextEncoder_FSM.
+    Captures attention weights from every encoder block and 
+    computes cumulative attention flow from input to output.
+    """
+    def __init__(self, model):
+        self.model = model
+        self.attention_maps = []
+        
+        text_encoder = model.text_encoder
+        for block in text_encoder.blocks:
+            block.attn.register_forward_hook(self._save_attention)
+    
+    def _save_attention(self, module, input, output):
+        # The Attention class computes attn internally
+        # We need to hook into the softmax output
+        # Recalculate from the stored qkv
+        B, N, C = input[0].shape
+        qkv = module.qkv(input[0]).reshape(B, N, 3, module.num_heads, C // module.num_heads).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        attn = (q @ k.transpose(-2, -1)) * module.scale
+        attn = attn.softmax(dim=-1)  # [B, H, N, N]
+        self.attention_maps.append(attn.detach().cpu())
+    
+    def compute(self, text, ta_perform='textr'):
+        """
+        Returns per-token importance scores [B, seq_len].
+        """
+        self.attention_maps = []
+        
+        with torch.no_grad():
+            self.model(text=text, ta_perform=ta_perform)
+        
+        # Rollout: multiply attention matrices across layers
+        # Average over heads first
+        result = None
+        for attn in self.attention_maps:
+            # attn: [B, H, N, N]
+            attn_avg = attn.mean(dim=1)  # [B, N, N]
+            
+            # Add identity (residual connections)
+            I = torch.eye(attn_avg.size(-1)).unsqueeze(0)
+            attn_avg = 0.5 * attn_avg + 0.5 * I
+            
+            # Re-normalize rows
+            attn_avg = attn_avg / attn_avg.sum(dim=-1, keepdim=True)
+            
+            if result is None:
+                result = attn_avg
+            else:
+                result = torch.matmul(result, attn_avg)
+        
+        # Extract importance from CLS token row (or first token)
+        # result[:, 0, :] gives how much CLS attends to each token
+        token_importance = result[:, 0, :]  # [B, N]
+        
+        # Normalize
+        token_importance = token_importance / token_importance.max(dim=1, keepdim=True)[0]
+        
+        return token_importance
+```
+
+### 2.4 FastSHAP for Cross-Modal Budget Allocation
+
+**What it does:** Trains a small "explainer" network that approximates Shapley values for each modality's contribution to the final output. Used to decide how to split the transmission budget across modalities.
+
+```python
+# Create: xai/fast_shap_crossmodal.py
+
+import torch
+import torch.nn as nn
+import numpy as np
+from itertools import product
+
+class FastSHAPCrossModal:
+    """
+    FastSHAP approximation for cross-modal contribution scoring.
+    
+    For 3 modalities (image, text, speech), there are 2^3 = 8
+    possible coalitions. We approximate Shapley values by
+    training a small network to predict the model's output
+    for each coalition.
+    """
+    def __init__(self, model, num_modalities=3):
+        self.model = model
+        self.num_modalities = num_modalities
+        
+        # Explainer network: maps model activations → Shapley values
+        self.explainer = nn.Sequential(
+            nn.Linear(128 * num_modalities, 256),
+            nn.ReLU(),
+            nn.Linear(256, 64),
+            nn.ReLU(),
+            nn.Linear(64, num_modalities),
+            nn.Softmax(dim=-1)
+        )
+    
+    def compute_coalition_values(self, img, text, speech, ta_perform, criterion, targets):
+        """
+        Evaluate model output for all 2^M coalitions.
+        A coalition masks/unmasks each modality.
+        Returns dict: coalition_binary → output_value
+        """
+        values = {}
+        for coalition in product([0, 1], repeat=self.num_modalities):
+            # coalition = (img_present, text_present, speech_present)
+            c_img = img if coalition[0] else torch.zeros_like(img)
+            c_text = text if coalition[1] else torch.zeros_like(text)
+            c_speech = speech if coalition[2] else torch.zeros_like(speech)
+            
+            with torch.no_grad():
+                output = self.model(img=c_img, text=c_text, speech=c_speech,
+                                    ta_perform=ta_perform)
+                if isinstance(output, dict):
+                    output = output['outputs']
+                loss = criterion(output, targets)
+                values[coalition] = -loss.item()  # Negative loss = value
+        
+        return values
+    
+    def compute_shapley_exact(self, coalition_values):
+        """
+        Compute exact Shapley values from coalition values.
+        For M=3 modalities, this is tractable (8 coalitions).
+        """
+        M = self.num_modalities
+        shapley = np.zeros(M)
+        
+        for i in range(M):
+            for coalition in product([0, 1], repeat=M):
+                if coalition[i] == 1:
+                    # Coalition without player i
+                    without_i = list(coalition)
+                    without_i[i] = 0
+                    without_i = tuple(without_i)
+                    
+                    # Marginal contribution
+                    s = sum(without_i)
+                    weight = (np.math.factorial(s) * np.math.factorial(M - s - 1)) / np.math.factorial(M)
+                    marginal = coalition_values[coalition] - coalition_values[without_i]
+                    shapley[i] += weight * marginal
+        
+        # Normalize to proportions
+        shapley_positive = np.maximum(shapley, 0)
+        total = shapley_positive.sum()
+        if total > 0:
+            shapley_positive = shapley_positive / total
+        else:
+            shapley_positive = np.ones(M) / M
+        
+        return shapley_positive  # [img_share, text_share, speech_share]
+```
+
+### 2.5 Faithfulness Validation (Deletion/Insertion Tests)
+
+This is the **empirical proof** that the XAI scores are meaningful:
+
+```python
+# Create: xai/faithfulness.py
+
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+
+class FaithfulnessTest:
+    """
+    Deletion test: Remove features in order of importance (most→least).
+    If importance scores are meaningful, performance should drop FAST.
+    
+    Insertion test: Add features in order of importance (most→least).
+    If scores are meaningful, performance should RISE FAST.
+    
+    Compare against random ordering as control.
+    """
+    def __init__(self, model, criterion):
+        self.model = model
+        self.criterion = criterion
+    
+    def deletion_test(self, features, importance_scores, 
+                      ta_perform, targets, n_steps=10):
+        """
+        features: [B, N, D]
+        importance_scores: [B, N]
+        Returns: list of performance values as features are removed
+        """
+        B, N, D = features.shape
+        sorted_indices = torch.argsort(importance_scores, dim=1, descending=True)
+        
+        performances = []
+        step_size = max(1, N // n_steps)
+        
+        for k in range(0, N + 1, step_size):
+            masked_features = features.clone()
+            if k > 0:
+                # Zero out the top-k most important features
+                for b in range(B):
+                    indices_to_remove = sorted_indices[b, :k]
+                    masked_features[b, indices_to_remove] = 0
+            
+            with torch.no_grad():
+                output = self.model.decode(masked_features, ta_perform)
+                perf = self._compute_metric(output, targets, ta_perform)
+            performances.append(perf)
+        
+        return performances
+    
+    def deletion_random_baseline(self, features, ta_perform, targets, n_steps=10, n_runs=5):
+        """Random deletion ordering as control."""
+        all_perfs = []
+        B, N, D = features.shape
+        
+        for _ in range(n_runs):
+            random_order = torch.randperm(N).unsqueeze(0).expand(B, -1)
+            perfs = self.deletion_test(features, 
+                                        torch.randn(B, N),  # random scores
+                                        ta_perform, targets, n_steps)
+            all_perfs.append(perfs)
+        
+        return np.mean(all_perfs, axis=0)
+    
+    def plot_faithfulness(self, xai_deletion, random_deletion, metric_name='PSNR'):
+        """Plot deletion curves showing XAI scores are meaningful."""
+        fig, ax = plt.subplots(figsize=(8, 6))
+        x = np.linspace(0, 100, len(xai_deletion))
+        
+        ax.plot(x, xai_deletion, 'r-o', label='XAI-guided deletion', linewidth=2)
+        ax.plot(x, random_deletion, 'b--s', label='Random deletion', linewidth=2)
+        
+        ax.set_xlabel('% of features removed (most→least important)')
+        ax.set_ylabel(metric_name)
+        ax.set_title('Deletion Test: Faithfulness of Importance Scores')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Area Under Deletion Curve (lower = better XAI)
+        auc_xai = np.trapz(xai_deletion, x)
+        auc_random = np.trapz(random_deletion, x)
+        ax.text(0.02, 0.02, f'AUC (XAI): {auc_xai:.1f}\nAUC (Random): {auc_random:.1f}',
+                transform=ax.transAxes, fontsize=10, verticalalignment='bottom',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        return fig
+    
+    def _compute_metric(self, output, targets, ta_perform):
+        if ta_perform.startswith('imgr'):
+            mse = torch.nn.MSELoss()(output, targets)
+            psnr = 10 * torch.log10(1.0 / mse)
+            return psnr.item()
+        elif ta_perform.endswith('c'):
+            _, predicted = output.max(1)
+            acc = predicted.eq(targets).float().mean()
+            return acc.item()
+```
+
+### Phase 2 Deliverables
+
+- [ ] Grad-CAM heatmaps for 10+ sample images at various SNRs
+- [ ] Attention Rollout visualizations for 10+ sample sentences
+- [ ] Cross-modal Shapley values showing modality contribution split
+- [ ] Faithfulness deletion/insertion curves proving scores are meaningful
+- [ ] Correlation analysis: do XAI scores agree with what the FSM actually selects?
+- [ ] Documentation: "Here's what the black-box FSM learned" analysis
+
+---
+
+## Phase 3 — XAI-Driven FSM Replacement (Primary Contribution)
+
+> **Goal:** Replace the black-box FSM with an explainability-driven feature selector. Transmission decisions are computed directly from XAI scores, not from a learned MLP + Gumbel-Softmax.
+
+### 3.1 Architecture of the XAI Feature Selector
+
+```
+┌──────────────────────────────────────────────────────┐
+│                XAI-Driven Feature Selector            │
+│                                                       │
+│  Input: encoded features [B, N, D] + noise_std        │
+│                                                       │
+│  Step 1: Compute overall transmission ratio δ         │
+│          δ = f(SNR), same adaptive logic as base      │
+│          K_total = round(N_total × δ)                 │
+│                                                       │
+│  Step 2: Cross-modal budget allocation (FastSHAP)     │
+│          [s_img, s_text, s_spe] = SHAP contributions  │
+│          K_img = round(K_total × s_img)               │
+│          K_text = round(K_total × s_text)             │
+│          K_spe = round(K_total × s_spe)               │
+│                                                       │
+│  Step 3: Within-modality selection                    │
+│          Image:  top-K_img by Grad-CAM scores         │
+│          Text:   top-K_text by Attention Rollout      │
+│          Speech: top-K_spe by Grad-CAM (spectrogram)  │
+│                                                       │
+│  Output: selected features [B, K_total, D]            │
+│          + importance_scores (for retransmission)      │
+└──────────────────────────────────────────────────────┘
+```
+
+### 3.2 Implementation
+
+```python
+# Create: modules/xai_feature_selector.py
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+
+class XAIFeatureSelector(nn.Module):
+    """
+    Replaces the black-box FSM with an explainability-driven
+    feature selector. Feature importance is computed from XAI
+    methods (Grad-CAM, Attention Rollout, FastSHAP), not from
+    a learned MLP + Gumbel-Softmax.
+    
+    This is "interpretable by construction" — the selection
+    decision IS the explanation.
+    """
+    def __init__(self, img_embed_dim, text_embed_dim, speech_embed_dim,
+                 num_img_patches=49, num_text_tokens=66, num_speech_frames=50):
+        super().__init__()
+        
+        self.num_img_patches = num_img_patches
+        self.num_text_tokens = num_text_tokens
+        self.num_speech_frames = num_speech_frames
+        
+        # SNR-to-ratio mapping (learned, same adaptive logic as base paper)
+        # But now it's a simple, interpretable function
+        self.ratio_net = nn.Sequential(
+            nn.Linear(1, 16),
+            nn.ReLU(),
+            nn.Linear(16, 1),
+            nn.Sigmoid()  # Output in [0, 1]
+        )
+        
+        # Cross-modal SHAP explainer (lightweight)
+        self.shap_explainer = nn.Sequential(
+            nn.Linear(img_embed_dim + text_embed_dim + speech_embed_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 3),  # [img_weight, text_weight, speech_weight]
+            nn.Softmax(dim=-1)
+        )
+    
+    def compute_transmission_ratio(self, noise_std):
+        """
+        Maps channel noise level to transmission ratio.
+        Higher noise → more features transmitted (higher ratio).
+        """
+        snr = 10 * torch.log10((1 / noise_std) ** 2)
+        # Normalize SNR to reasonable range
+        snr_normalized = (snr + 6) / 18  # Maps [-6, 12] → [0, 1]
+        snr_normalized = snr_normalized.clamp(0, 1)
+        ratio = self.ratio_net(snr_normalized.unsqueeze(-1))
+        return ratio.squeeze(-1)
+    
+    def forward(self, img_features=None, text_features=None, speech_features=None,
+                img_importance=None, text_importance=None, speech_importance=None,
+                noise_std=None, ta_perform=None):
+        """
+        Args:
+            img_features:    [B, N_img, D_img] from image encoder
+            text_features:   [B, N_text, D_text] from text encoder
+            speech_features: [B, N_spe, D_spe] from speech encoder
+            img_importance:  [B, N_img] from Grad-CAM
+            text_importance: [B, N_text] from Attention Rollout
+            speech_importance: [B, N_spe] from Grad-CAM (spectrogram)
+            noise_std:       scalar, channel noise std
+        
+        Returns:
+            selected_features: dict of selected features per modality
+            selection_masks: dict of binary masks showing what was selected
+            importance_scores: dict of importance scores (for retransmission)
+        """
+        # Step 1: Overall transmission ratio
+        ratio = self.compute_transmission_ratio(noise_std)
+        
+        # Step 2: Modality-specific selection
+        selected = {}
+        masks = {}
+        scores = {}
+        
+        modalities = []
+        if img_features is not None:
+            modalities.append(('img', img_features, img_importance, self.num_img_patches))
+        if text_features is not None:
+            modalities.append(('text', text_features, text_importance, self.num_text_tokens))
+        if speech_features is not None:
+            modalities.append(('spe', speech_features, speech_importance, self.num_speech_frames))
+        
+        for mod_name, features, importance, num_features in modalities:
+            B = features.shape[0]
+            K = max(1, int(num_features * ratio.item()))
+            
+            # Select top-K by importance score
+            _, top_indices = torch.topk(importance, K, dim=1)
+            top_indices_sorted, _ = torch.sort(top_indices, dim=1)  # Maintain order
+            
+            # Gather selected features
+            selected_feat = torch.gather(
+                features, 1, 
+                top_indices_sorted.unsqueeze(-1).expand(-1, -1, features.shape[-1])
+            )
+            
+            # Create selection mask
+            mask = torch.zeros(B, num_features, 1, device=features.device)
+            mask.scatter_(1, top_indices_sorted.unsqueeze(-1), 1.0)
+            
+            # Store importance scores of selected features
+            selected_importance = torch.gather(importance, 1, top_indices_sorted)
+            
+            selected[mod_name] = selected_feat
+            masks[mod_name] = mask
+            scores[mod_name] = selected_importance
+        
+        return selected, masks, scores
+```
+
+### 3.3 Modified UDeepSC Model with XAI Selector
+
+```python
+# Create: modules/udeepsc_xai.py
+# This extends the original UDeepSC class, replacing the FSM with the XAI selector
+
+class UDeepSC_XAI(nn.Module):
+    """
+    Modified U-DeepSC that replaces the black-box FSM with
+    XAI-driven feature selection.
+    
+    Key difference: The encoder backbone (ViT blocks, BERT blocks)
+    is REUSED from the trained baseline. Only the feature selection
+    mechanism is replaced.
+    """
+    def __init__(self, baseline_model, xai_selector, grad_cam, attention_rollout):
+        super().__init__()
+        # Reuse trained encoders from baseline
+        self.img_encoder_backbone = baseline_model.img_encoder  # ViT blocks
+        self.text_encoder_backbone = baseline_model.text_encoder  # BERT blocks
+        self.spe_encoder_backbone = baseline_model.spe_encoder
+        
+        # NEW: XAI-driven selector (replaces FSM)
+        self.xai_selector = xai_selector
+        self.grad_cam = grad_cam
+        self.attention_rollout = attention_rollout
+        
+        # Reuse decoder, codebook, heads from baseline
+        self.decoder = baseline_model.decoder
+        self.codebook = baseline_model.codebook
+        self.head = baseline_model.head
+        self.task_dict = baseline_model.task_dict
+        self.channel = baseline_model.channel
+        
+        # Projections
+        self.text_channel_to_decoder = baseline_model.text_channel_to_decoder
+        self.img_channel_to_decoder = baseline_model.img_channel_to_decoder
+        self.spe_channel_to_decoder = baseline_model.spe_channel_to_decoder
+    
+    def forward(self, text=None, img=None, speech=None, 
+                ta_perform=None, test_snr=torch.FloatTensor([12])):
+        # ... (full forward pass with XAI-based selection)
+        # 1. Run encoder backbone (without FSM)
+        # 2. Compute XAI importance scores
+        # 3. Select features using XAI scores
+        # 4. Codebook quantization
+        # 5. Channel transmission
+        # 6. Decoder
+        pass
+```
+
+### 3.4 Selective Retransmission Module
+
+```python
+# Create: modules/selective_retransmission.py
+
+import torch
+import numpy as np
+
+class SelectiveRetransmission:
+    """
+    Explainability-guided selective retransmission.
+    
+    Logic:
+    1. After channel transmission, detect which features were corrupted
+       (by comparing received codebook indices to nearest valid entry)
+    2. For each corrupted feature, check its importance score
+    3. If importance > threshold → retransmit just that feature
+    4. If importance < threshold → leave as-is (not worth bandwidth)
+    
+    This mirrors classical ARQ but the "worth retransmitting?" decision
+    is explainability-driven.
+    """
+    def __init__(self, codebook, importance_threshold=0.7):
+        self.codebook = codebook
+        self.threshold = importance_threshold
+    
+    def detect_corruption(self, received_features, original_indices):
+        """
+        Compare received quantized features against what was sent.
+        
+        Returns:
+            corruption_mask: [B, K] boolean tensor, True = corrupted
+            corruption_severity: [B, K] float tensor, distance to nearest codebook entry
+        """
+        B, K, D = received_features.shape
+        flat = received_features.view(-1, D)
+        
+        # Distance to nearest codebook entry
+        dist = torch.sum(flat ** 2, dim=1, keepdim=True) + \
+               torch.sum(self.codebook.embedding.weight ** 2, dim=1) - \
+               2 * torch.matmul(flat, self.codebook.embedding.weight.t())
+        
+        min_dist = dist.min(dim=1)[0]  # [BK]
+        severity = min_dist.view(B, K)
+        
+        # Corrupted = distance exceeds learned threshold
+        corruption_mask = severity > severity.mean() + severity.std()
+        
+        return corruption_mask, severity
+    
+    def decide_retransmission(self, corruption_mask, importance_scores):
+        """
+        Decide which corrupted features to retransmit.
+        
+        Returns:
+            retransmit_mask: [B, K] boolean, True = retransmit this feature
+            n_retransmit: number of features to retransmit
+        """
+        # Retransmit if: corrupted AND important
+        important = importance_scores > self.threshold
+        retransmit_mask = corruption_mask & important
+        n_retransmit = retransmit_mask.sum().item()
+        
+        return retransmit_mask, n_retransmit
+    
+    def retransmit(self, original_features, retransmit_mask, received_features,
+                   channel_fn, noise_std):
+        """
+        Re-send only the selected features through the channel.
+        Uses the original (uncorrupted) copy from the transmitter.
+        Fresh noise draw on the retransmission.
+        """
+        B, K, D = original_features.shape
+        result = received_features.clone()
+        
+        for b in range(B):
+            retx_indices = retransmit_mask[b].nonzero(as_tuple=True)[0]
+            if len(retx_indices) > 0:
+                # Retransmit through channel with fresh noise
+                retx_features = original_features[b, retx_indices]
+                retx_received = channel_fn(retx_features.unsqueeze(0), noise_std)
+                result[b, retx_indices] = retx_received.squeeze(0)
+        
+        return result
+    
+    def compute_overhead(self, retransmit_mask, total_features):
+        """
+        Compute retransmission overhead as a fraction of total symbols.
+        """
+        n_retransmit = retransmit_mask.sum().item()
+        overhead_ratio = n_retransmit / total_features
+        return overhead_ratio, n_retransmit
+```
+
+### 3.5 Training Strategy for XAI-Replaced Model
+
+> [!IMPORTANT]
+> You do NOT retrain the entire model from scratch. The strategy is:
+> 1. **Freeze** the encoder backbones (pretrained from baseline)
+> 2. **Train** only the XAI selector's ratio_net and the decoder's adaptation
+> 3. **Fine-tune** end-to-end with a very small learning rate
+
+```python
+# Training configuration for XAI model
+def setup_xai_training(baseline_checkpoint_path):
+    # Load trained baseline
+    baseline = load_baseline(baseline_checkpoint_path)
+    
+    # Create XAI model
+    xai_model = UDeepSC_XAI(baseline, ...)
+    
+    # Freeze encoder backbones
+    for param in xai_model.img_encoder_backbone.parameters():
+        param.requires_grad = False
+    for param in xai_model.text_encoder_backbone.parameters():
+        param.requires_grad = False
+    for param in xai_model.spe_encoder_backbone.parameters():
+        param.requires_grad = False
+    
+    # Only train: ratio_net + decoder adaptation
+    trainable_params = list(xai_model.xai_selector.parameters()) + \
+                       list(xai_model.decoder.parameters())
+    
+    optimizer = torch.optim.AdamW(trainable_params, lr=1e-4)
+    
+    return xai_model, optimizer
+```
+
+### 3.6 Comparative Evaluation
+
+Run the **exact same evaluation** as Phase 1, now with the XAI model:
+
+```python
+# Compare: Black-box FSM vs XAI Selector vs Classical Baselines
+results = {}
+snr_range = np.arange(-6, 14, 2)
+
+for snr in snr_range:
+    results['XAI_Selector'] = evaluate(xai_model, snr)
+    results['BlackBox_FSM'] = evaluate(baseline_model, snr)
+    results['JPEG_LDPC'] = evaluate_classical_image(snr)
+    results['UTF8_Turbo'] = evaluate_classical_text(snr)
+```
+
+### Phase 3 Deliverables
+
+- [ ] `XAIFeatureSelector` module implemented and tested
+- [ ] `UDeepSC_XAI` model with replaced FSM
+- [ ] `SelectiveRetransmission` module implemented
+- [ ] Training completed (frozen backbone + fine-tuned selector/decoder)
+- [ ] Comparative results table: XAI vs FSM vs Classical at every SNR
+- [ ] Retransmission overhead analysis
+- [ ] Faithfulness curves for XAI selector (proving it's better than black-box)
+
+---
+
+## Phase 4 — MATLAB/Simulink Integration & ESP32 Hardware
+
+### 4.1 MATLAB/Simulink Channel Model
+
+```matlab
+% Create: matlab/semcom_channel_model.slx (Simulink)
+%
+% Block diagram:
+% [Source Bits] → [QPSK Modulator] → [AWGN Channel (SNR slider)] 
+%     → [QPSK Demodulator] → [BER Calculator] → [Display]
+%
+% Live scopes:
+% - Constellation diagram (scatter plot)
+% - BER vs time
+% - SNR slider (adjustable during simulation)
+```
+
+#### Python Interoperability from MATLAB
+
+```matlab
+% matlab/run_semcom_pipeline.m
+
+function [reconstructed, metrics] = run_semcom_pipeline(input_data, modality, snr)
+    % Call Python pipeline from MATLAB
+    py_env = pyenv('Version', 'C:\Users\varsh\anaconda3\envs\xai_semcom\python.exe');
+    
+    % Import the pipeline module
+    py_pipeline = py.importlib.import_module('pipeline');
+    
+    % Run the semantic communication pipeline
+    result = py_pipeline.run(input_data, modality, snr);
+    
+    % Extract results
+    reconstructed = double(result{'reconstructed'});
+    metrics = struct(result{'metrics'});
+end
+```
+
+### 4.2 MATLAB App Designer GUI
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Explainable Multimodal Semantic Communication      │
+│  ─────────────────────────────────────────────────── │
+│                                                      │
+│  [Image] [Text] [Speech]          ← Tab selector     │
+│                                                      │
+│  ┌──────────────┐  ┌──────────────┐                  │
+│  │  ORIGINAL    │  │ RECONSTRUCTED│                  │
+│  │              │  │              │                  │
+│  │   [image]    │  │   [image]    │                  │
+│  └──────────────┘  └──────────────┘                  │
+│                                                      │
+│  SNR: [====●==========] 12 dB     ← Live slider     │
+│                                                      │
+│  [TRANSMIT]  [SHOW XAI]  [RETRANSMIT]               │
+│                                                      │
+│  ┌──────────────────────────────────────────┐        │
+│  │ Constellation    │  BER: 0.0023          │        │
+│  │    .  . .  .     │  PSNR: 24.3 dB        │        │
+│  │   . .. .. .      │  Features sent: 15/49  │        │
+│  │    .  . .  .     │  Retransmitted: 2      │        │
+│  └──────────────────────────────────────────┘        │
+└─────────────────────────────────────────────────────┘
+```
+
+### 4.3 ESP32 Hardware Setup
+
+#### Bill of Materials
+
+| Component | Qty | Est. Cost |
+|---|---|---|
+| ESP32 DevKit v1 | 2 | ₹800 |
+| USB-A to Micro-USB cables | 2 | ₹200 |
+| Breadboard (optional) | 1 | ₹100 |
+| **Total** | | **~₹1,100** |
+
+#### ESP32 Transmitter Firmware
+
+```cpp
+// esp32/transmitter/transmitter.ino
+
+#include <esp_now.h>
+#include <WiFi.h>
+
+uint8_t receiverMAC[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}; // Set actual MAC
+
+void setup() {
+    Serial.begin(115200);
+    WiFi.mode(WIFI_STA);
+    
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("ESP-NOW Init Failed");
+        return;
+    }
+    
+    esp_now_peer_info_t peerInfo;
+    memcpy(peerInfo.peer_addr, receiverMAC, 6);
+    peerInfo.channel = 0;
+    peerInfo.encrypt = false;
+    esp_now_add_peer(&peerInfo);
+}
+
+void loop() {
+    // Read bitstream from Python via Serial
+    if (Serial.available() > 0) {
+        uint8_t buffer[250]; // ESP-NOW max payload
+        int len = Serial.readBytes(buffer, min(250, Serial.available()));
+        
+        // Transmit via 2.4GHz RF
+        esp_now_send(receiverMAC, buffer, len);
+    }
+}
+```
+
+#### ESP32 Receiver Firmware
+
+```cpp
+// esp32/receiver/receiver.ino
+
+#include <esp_now.h>
+#include <WiFi.h>
+
+void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
+    // Forward received bits to Python via Serial
+    Serial.write(data, len);
+}
+
+void setup() {
+    Serial.begin(115200);
+    WiFi.mode(WIFI_STA);
+    esp_now_init();
+    esp_now_register_recv_cb(onReceive);
+}
+
+void loop() {
+    // Receiver is interrupt-driven
+    delay(1);
+}
+```
+
+#### Python Serial Bridge
+
+```python
+# Create: hardware/esp32_bridge.py
+
+import serial
+import struct
+import time
+import numpy as np
+
+class ESP32Bridge:
+    def __init__(self, tx_port='COM3', rx_port='COM4', baud=115200):
+        self.tx = serial.Serial(tx_port, baud, timeout=1)
+        self.rx = serial.Serial(rx_port, baud, timeout=1)
+        time.sleep(2)  # Wait for ESP32 reset
+    
+    def transmit(self, bitstream: np.ndarray) -> np.ndarray:
+        """
+        Send quantized codebook indices through ESP32 RF link.
+        
+        Args:
+            bitstream: numpy array of uint8 values (codebook indices)
+        Returns:
+            received: numpy array of uint8 values (potentially corrupted)
+        """
+        # Chunk into 250-byte ESP-NOW packets
+        chunk_size = 250
+        received_chunks = []
+        
+        for i in range(0, len(bitstream), chunk_size):
+            chunk = bitstream[i:i+chunk_size].tobytes()
+            self.tx.write(chunk)
+            time.sleep(0.05)  # Give time for RF transmission
+            
+            # Read from receiver
+            rx_data = self.rx.read(len(chunk))
+            if len(rx_data) < len(chunk):
+                # Packet loss detected!
+                rx_data += b'\x00' * (len(chunk) - len(rx_data))
+            received_chunks.append(np.frombuffer(rx_data, dtype=np.uint8))
+        
+        return np.concatenate(received_chunks)
+    
+    def close(self):
+        self.tx.close()
+        self.rx.close()
+```
+
+### Phase 4 Deliverables
+
+- [ ] Simulink model with QPSK modulation, AWGN channel, constellation diagram
+- [ ] App Designer GUI with tabs for image/text/speech
+- [ ] Python↔MATLAB bridge working via `pyenv`
+- [ ] ESP32 firmware uploaded and tested (basic ping-pong)
+- [ ] Full pipeline: Python → Serial → ESP32 TX → RF → ESP32 RX → Serial → Python
+- [ ] Demo: show packet loss at increased distance → retransmission recovery
+
+---
+
+## Phase 5 — Evaluation & Results
+
+### 5.1 Full Experiment Matrix
+
+| Experiment | Models | SNR Range | Metrics | Dataset |
+|---|---|---|---|---|
+| Image Reconstruction | XAI / FSM / JPEG+LDPC | [-6, 12] dB | PSNR, SSIM, CBR | CIFAR-10 |
+| Text Reconstruction | XAI / FSM / UTF-8+Turbo | [-6, 12] dB | BLEU, BER, CBR | SST-2 |
+| Feature Selection Quality | XAI vs FSM | [-6, 12] dB | Faithfulness (AUC) | Both |
+| Retransmission | With/Without retx | [-6, 12] dB | PSNR gain vs overhead | CIFAR-10 |
+| Cross-modal allocation | Equal vs SHAP-driven | Fixed 6 dB | PSNR, BLEU | Multi-modal |
+
+### 5.2 Classical Baselines Implementation
+
+```python
+# Create: baselines/classical_baselines.py
+
+import numpy as np
+from PIL import Image
+import io
+
+# For LDPC/Turbo, use commpy or sionna
+# pip install sionna  (TF-based, but has standalone channel codes)
+# OR implement simplified versions
+
+class ClassicalImageBaseline:
+    """JPEG + LDPC channel coding baseline."""
+    
+    def encode(self, image, quality=75):
+        """JPEG source coding."""
+        img = Image.fromarray((image * 255).astype(np.uint8))
+        buffer = io.BytesIO()
+        img.save(buffer, format='JPEG', quality=quality)
+        return np.frombuffer(buffer.getvalue(), dtype=np.uint8)
+    
+    def channel_code(self, data, rate=0.5):
+        """Simplified LDPC encoding (use commpy for real implementation)."""
+        # Placeholder: repeat code for simplicity, replace with commpy.channelcoding
+        return np.repeat(data, int(1/rate))
+    
+    def transmit(self, coded_data, snr):
+        """BPSK modulation + AWGN channel."""
+        bpsk = 2 * coded_data.astype(float) - 1
+        noise_power = 10 ** (-snr / 10)
+        noise = np.sqrt(noise_power / 2) * np.random.randn(*bpsk.shape)
+        received = bpsk + noise
+        decoded = (received > 0).astype(np.uint8)
+        return decoded
+
+
+class ClassicalTextBaseline:
+    """UTF-8 + Turbo coding baseline."""
+    
+    def encode(self, text):
+        """UTF-8 source coding."""
+        return np.frombuffer(text.encode('utf-8'), dtype=np.uint8)
+    
+    # Similar structure to image baseline...
+```
+
+### 5.3 Results Visualization
+
+```python
+# Create: evaluation/plot_results.py
+
+def plot_psnr_vs_snr(results_dict, save_path='results/psnr_vs_snr.png'):
+    """
+    Plot PSNR vs SNR for all methods.
+    This is the main comparison figure for the paper.
+    """
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    styles = {
+        'XAI_Selector': ('o-', 'tab:blue', 'Proposed (XAI-Driven)'),
+        'BlackBox_FSM': ('s--', 'tab:orange', 'U-DeepSC (Black-box FSM)'),
+        'JPEG_LDPC': ('^-.', 'tab:green', 'JPEG + LDPC'),
+        'No_Selection': ('D:', 'tab:red', 'No Feature Selection'),
+    }
+    
+    snr_range = np.arange(-6, 14, 2)
+    for method, (style, color, label) in styles.items():
+        if method in results_dict:
+            ax.plot(snr_range, results_dict[method], style, 
+                    color=color, label=label, linewidth=2, markersize=8)
+    
+    ax.set_xlabel('SNR (dB)', fontsize=12)
+    ax.set_ylabel('PSNR (dB)', fontsize=12)
+    ax.set_title('Image Reconstruction Quality vs Channel SNR')
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+```
+
+---
+
+## Testing Strategy
+
+### Unit Tests
+
+```python
+# Create: tests/test_xai_modules.py
+
+import pytest
+import torch
+
+class TestGradCAM:
+    def test_output_shape(self):
+        """Grad-CAM should produce [B, N_patches] importance scores."""
+        # ... setup model, run grad_cam.compute()
+        assert cam.shape == (batch_size, num_patches)
+    
+    def test_scores_normalized(self):
+        """Importance scores should be in [0, 1]."""
+        assert cam.min() >= 0.0
+        assert cam.max() <= 1.0
+    
+    def test_sum_positive(self):
+        """At least some features should be deemed important."""
+        assert cam.sum() > 0
+
+class TestXAISelector:
+    def test_fewer_features_at_high_snr(self):
+        """High SNR should select fewer features (lower ratio)."""
+        K_low_snr = selector(noise_std=high_noise)  # low SNR
+        K_high_snr = selector(noise_std=low_noise)   # high SNR
+        assert K_low_snr > K_high_snr
+    
+    def test_output_features_are_subset(self):
+        """Selected features must come from the original set."""
+        # Verify indices are valid
+        pass
+
+class TestRetransmission:
+    def test_only_important_corrupted_retransmitted(self):
+        """Only features that are both corrupted AND important get retransmitted."""
+        pass
+    
+    def test_overhead_bounded(self):
+        """Retransmission overhead should be < 20% of original transmission."""
+        pass
+```
+
+### Integration Tests
+
+```python
+# Create: tests/test_pipeline_integration.py
+
+class TestFullPipeline:
+    def test_encode_transmit_decode_image(self):
+        """Full pipeline: image → encode → select → quantize → channel → decode → reconstruct."""
+        pass
+    
+    def test_xai_scores_match_selection(self):
+        """Verify that the features actually selected match the XAI ranking."""
+        pass
+    
+    def test_retransmission_improves_quality(self):
+        """Retransmission should improve PSNR when important features are corrupted."""
+        pass
+```
+
+### Smoke Tests (Quick Sanity Checks)
+
+```python
+# Create: tests/test_smoke.py
+
+def test_model_loads():
+    """Model should load without errors."""
+    model = UDeepSC_model()
+    assert model is not None
+
+def test_forward_pass():
+    """Single forward pass should complete."""
+    model = UDeepSC_model()
+    img = torch.randn(1, 3, 224, 224)
+    output = model(img=img, ta_perform='imgr')
+    assert output is not None
+
+def test_channel_simulation():
+    """AWGN channel should add noise."""
+    signal = np.ones(100)
+    noisy = channel(signal, SNRdb=10)
+    assert not np.allclose(signal, noisy)
+```
+
+---
+
+## Project Directory Structure (Final)
+
+```
+t-udeepsc/
+├── UDeepSC_FSM/                    # ← Base paper code (Stage 1 baseline)
+│   ├── model.py                    # UDeepSC architecture
+│   ├── model_util.py               # Encoders, FSM, VQ, channel models
+│   ├── channel.py                  # Channel simulation
+│   ├── modulator.py                # QAM modulation
+│   ├── engine.py                   # Training/evaluation loops
+│   ├── udeepsc_main.py             # Entry point
+│   ├── datasets.py                 # Data loaders
+│   ├── base_args.py                # CLI arguments
+│   ├── utils.py                    # Utilities
+│   └── data/                       # Dataset helpers
+│
+├── xai/                            # ← Stage 2: XAI diagnosis tools
+│   ├── grad_cam_image.py
+│   ├── attention_rollout_text.py
+│   ├── fast_shap_crossmodal.py
+│   └── faithfulness.py
+│
+├── modules/                        # ← Stage 3: XAI-driven replacements
+│   ├── xai_feature_selector.py     # Replaces FSM
+│   ├── udeepsc_xai.py             # Modified model
+│   └── selective_retransmission.py # Retransmission mechanism
+│
+├── baselines/                      # Classical comparison baselines
+│   └── classical_baselines.py      # JPEG+LDPC, UTF-8+Turbo, PCM+LDPC
+│
+├── evaluation/                     # Results and plotting
+│   ├── evaluate_snr_sweep.py
+│   ├── plot_results.py
+│   └── results/                    # Saved figures and CSVs
+│
+├── matlab/                         # MATLAB/Simulink integration
+│   ├── semcom_channel_model.slx    # Simulink model
+│   ├── run_semcom_pipeline.m       # Python interop bridge
+│   └── app_designer_gui.mlapp     # GUI
+│
+├── hardware/                       # ESP32 hardware layer
+│   ├── esp32_bridge.py             # Python↔Serial bridge
+│   ├── transmitter/
+│   │   └── transmitter.ino         # ESP32 TX firmware
+│   └── receiver/
+│       └── receiver.ino            # ESP32 RX firmware
+│
+├── tests/                          # Test suite
+│   ├── test_xai_modules.py
+│   ├── test_pipeline_integration.py
+│   └── test_smoke.py
+│
+├── pipeline.py                     # Unified pipeline (called by MATLAB)
+├── requirements_updated.txt        # Updated dependencies
+└── README.md                       # Project documentation
+```
+
+---
+
+## Risk Register & Mitigations
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Baseline doesn't reproduce paper metrics | Blocks everything | Use original authors' checkpoints if available; accept ±2% variance |
+| XAI selector worse than black-box FSM | Weakens contribution | Phase 2 diagnosis provides fallback narrative ("we showed *why* it works, even if we can't beat it") |
+| BERT weights too large / slow | Training time | Use `bert-small` (already specified in code), not `bert-base` |
+| VQA/MSA datasets too large to download | Missing tasks | **Core contribution only needs CIFAR + SST.** VQA/MSA are bonus |
+| ESP32 packet loss too unreliable | Hardware demo | Add software-injected corruption flag as reproducible fallback |
+| MATLAB `pyenv` fails on your machine | Demo broken | Pre-record demo video as backup; test `pyenv` early |
+| GPU OOM during training | Can't train | Reduce batch_size to 16 or 8; use gradient accumulation |
+
+---
+
+## Immediate Next Steps (This Week)
+
+1. **Create conda environment** and install updated dependencies
+2. **Fix the 6 hardcoded path/import issues** listed in Phase 1
+3. **Download CIFAR-10 and SST-2** (auto-download, minutes)
+4. **Run a single forward pass** to verify imports work
+5. **Start baseline training** on `imgc` task (fastest to verify)
+
+> [!TIP]
+> Run `python -c "import torch; print(torch.cuda.is_available())"` first. If this returns `False`, fix your CUDA/PyTorch installation before doing anything else.
