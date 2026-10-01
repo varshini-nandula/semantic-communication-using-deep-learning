@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.conda/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Model checkpoints & large binaries
+*.pth
+*.pt
+*.ckpt
+*.bin
+*.h5
+*.pkl
+*.pickle
+
+# Dataset directories (download locally, don't commit)
+data/
+datasets/
+*.zip
+*.tar.gz
+*.tar
+*.gz
+
+# Evaluation outputs & results
+results/
+ckpt_*/
+logs/
+runs/
+wandb/
+*.log
+*.csv
+
+# MATLAB
+*.asv
+*.mex*
+slprj/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
