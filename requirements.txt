@@ -16,6 +16,11 @@ pytorch-msssim>=1.0.0
 nltk>=3.8.0
 scikit-learn>=1.2.0
 
+# Demo Suite Dependencies
+scikit-image>=0.21.0
+librosa>=0.10.0
+sentence-transformers>=2.2.0
+
 # Data & Math
 numpy>=1.23.0,<2.0.0
 pandas>=1.5.0
