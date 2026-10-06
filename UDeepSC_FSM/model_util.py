@@ -1,3 +1,4 @@
+import os
 import math
 import numpy as np
 from timm.models.registry import register_model
@@ -961,11 +962,8 @@ class VectorQuantizer(nn.Module):
         shape = encoding_inds.shape
         Rx_signal = commun_sim(encoding_inds, snr=snr, quan_bits=self.quan_bits)
 
-        encoding_inds = torch.from_numpy(Rx_signal).cuda().reshape(shape)
-  
-        
-        # Convert to one-hot encodings
         device = latents.device
+        encoding_inds = torch.from_numpy(Rx_signal).to(device).reshape(shape)
         
         encoding_one_hot = torch.zeros(encoding_inds.size(0), self.K, device=device)
         encoding_one_hot.scatter_(1, encoding_inds, 1)  # [BL x K]

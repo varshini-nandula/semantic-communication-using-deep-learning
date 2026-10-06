@@ -1,16 +1,19 @@
 import torch
 from torch import optim as optim
 
-from timm.optim.adafactor import Adafactor
-from timm.optim.adahessian import Adahessian
-from timm.optim.adamp import AdamP
-from timm.optim.lookahead import Lookahead
-from timm.optim.nadam import Nadam
-from timm.optim.novograd import NovoGrad
-from timm.optim.nvnovograd import NvNovoGrad
-from timm.optim.radam import RAdam
-from timm.optim.rmsprop_tf import RMSpropTF
-from timm.optim.sgdp import SGDP
+try:
+    from timm.optim.adafactor import Adafactor
+    from timm.optim.adahessian import Adahessian
+    from timm.optim.adamp import AdamP
+    from timm.optim.lookahead import Lookahead
+    from timm.optim.nadam import Nadam
+    from timm.optim.novograd import NovoGrad
+    from timm.optim.nvnovograd import NvNovoGrad
+    from timm.optim.radam import RAdam
+    from timm.optim.rmsprop_tf import RMSpropTF
+    from timm.optim.sgdp import SGDP
+except ImportError:
+    pass
 
 import json
 

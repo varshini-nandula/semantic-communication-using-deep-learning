@@ -17,7 +17,6 @@ from transformers import BertForSequenceClassification, BertModel
 from model_util import Block, _cfg, PatchEmbed, get_sinusoid_encoding_table
 from base_args import IMGC_NUMCLASS,TEXTC_NUMCLASS,IMGR_LENGTH,TEXTR_NUMCLASS,VQA_NUMCLASS,MSA_NUMCLASS
 
-from compressai.entropy_models import EntropyBottleneck, GaussianConditional
 def trunc_normal_(tensor, mean=0., std=1.):
     __call_trunc_normal_(tensor, mean=mean, std=std, a=-std, b=std)
 
@@ -32,8 +31,8 @@ class UDeepSC(nn.Module):
                  text_encoder_depth=4, speech_encoder_depth=4, encoder_num_heads=12, decoder_num_classes=768, 
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=8, mlp_ratio=4., 
                  qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0., drop_path_rate=0., 
-                 norm_layer=nn.LayerNorm, init_values=0.,use_learnable_pos_emb=False,num_classes=0, 
-                 ):
+                 norm_layer=nn.LayerNorm, init_values=0.,use_learnable_pos_emb=False,num_classes=0,
+                 **kwargs):
 
         super().__init__()
         self.img_encoder = ViTEncoder_FSM(img_size=img_size, patch_size=patch_size, in_chans=encoder_in_chans, 
@@ -112,7 +111,7 @@ class UDeepSC(nn.Module):
        
         
         self.decoder = Decoder(depth=decoder_depth,embed_dim=decoder_embed_dim, 
-                                num_heads=decoder_num_heads, dff=mlp_ratio*decoder_embed_dim, 
+                                num_heads=decoder_num_heads, dff=int(mlp_ratio*decoder_embed_dim), 
                                 drop_rate=drop_rate)
         self.channel = Channels()
         self.sigmoid_layer = nn.Sigmoid()
@@ -134,13 +133,14 @@ class UDeepSC(nn.Module):
         return {'pos_embed', 'cls_token', 'mask_token'}
 
     def forward(self, text=None, img=None, speech=None, ta_perform=None, test_snr=torch.FloatTensor([12])):
+        device = next(self.parameters()).device
         if self.training:
             noise_snr, noise_std = noise_gen(self.training)
-            noise_std,noise_snr = noise_std.cuda(), noise_snr.cpu().item()
+            noise_std, noise_snr = noise_std.to(device), noise_snr.cpu().item()
         else:
             noise_std = torch.FloatTensor([1]) * 10**(-test_snr/20)
             noise_snr = test_snr
-            noise_std = noise_std.cuda()
+            noise_std = noise_std.to(device)
         # noise_snr, noise_std = noise_gen(self.training)
         # noise_std, noise_snr = noise_std.cuda(), noise_snr.cpu().item()
         m_dict, rho_dict, codebook_loss = {},{},{}

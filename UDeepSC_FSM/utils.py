@@ -525,7 +525,7 @@ def calc_ssim(predictions, targets):
     return metric
 
 import nltk
-from pytorch_transformers import BertTokenizer
+from transformers import BertTokenizer
 from nltk.translate.bleu_score import sentence_bleu
 
 tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
