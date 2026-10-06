@@ -14,7 +14,11 @@ _sst_data = None
 def get_sst_data():
     global _sst_data
     if _sst_data is None:
-        _sst_data = pytreebank.load_sst()
+        local_sst_dir = os.path.join(os.path.dirname(__file__), "sst")
+        if os.path.exists(local_sst_dir):
+            _sst_data = pytreebank.load_sst(local_sst_dir)
+        else:
+            _sst_data = pytreebank.load_sst()
     return _sst_data
 
 def rpad(array, n=70):
@@ -46,6 +50,12 @@ class SST_CR(Dataset):
         else:
             self.sst = sst_data["test"]
         self.if_class = if_class
+        cache_dir = os.path.join(os.path.dirname(__file__), "sst")
+        cache_file = os.path.join(cache_dir, f"sst_cache_{'train' if train else 'test'}_{root}_{binary}.pt")
+        if os.path.exists(cache_file):
+            logger.info(f"Loading cached SST data from {cache_file}")
+            self.data = torch.load(cache_file, weights_only=False)
+            return
         if root and binary:
             self.data = [(rpad(tokenizer.encode("[CLS] " + tree.to_lines()[0] + " [SEP]"), n=66),
                           get_binary_label(tree.label),) 
@@ -65,6 +75,10 @@ class SST_CR(Dataset):
                 for tree in self.sst
                 for label, line in tree.to_labeled_lines()
                 if label != 2]
+        try:
+            torch.save(self.data, cache_file)
+        except Exception:
+            pass
         # for tree in self.sst:
         #     for label, line in tree.to_labeled_lines():
         #         if label != 2:

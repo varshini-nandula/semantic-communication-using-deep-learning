@@ -72,9 +72,10 @@ def build_dataloader(ta_sel, trainsets, args):
     for ta in ta_sel:
         trainset = trainsets[ta]
         Collate_fn = collate_fn if ta.startswith('msa') else None 
+        nsamp = args.num_samples if (hasattr(args, 'num_samples') and args.num_samples and args.num_samples < 15000*len(ta_sel)) else 15000*len(ta_sel)
         trainloader = torch.utils.data.DataLoader(dataset=trainset,
                                                 sampler=BatchSchedulerSampler(dataset=trainset,batch_size=args.batch_size,
-                                                number_samp=15000*len(ta_sel)),
+                                                number_samp=nsamp),
                                                 num_workers=args.num_workers, pin_memory=True,
                                                 batch_size=args.batch_size, shuffle=False,collate_fn=Collate_fn,
                                                 drop_last = True)
