@@ -25,8 +25,10 @@ def evaluate(ta_perform: str, net: torch.nn.Module, dataloader: Iterable,
     
     for snr in range(-6,10,1):
         noise_std = torch.FloatTensor([1]) * 10**(-snr/20)
-        print(net.img_encoder.RHO_Dict['imgc']((noise_std).cuda()))
-        print(net.text_encoder.RHO_Dict['textc'](noise_std.cuda()))
+        if 'imgc' in net.img_encoder.RHO_Dict:
+            print(net.img_encoder.RHO_Dict['imgc'](noise_std.to(device)))
+        if 'textc' in net.text_encoder.RHO_Dict:
+            print(net.text_encoder.RHO_Dict['textc'](noise_std.to(device)))
     if ta_perform.startswith('imgc'):
         acc_meter = AverageMeter()
         loss_meter = AverageMeter()
@@ -211,8 +213,7 @@ def train_epoch_uni(model: torch.nn.Module, criterion: dict,
     data_iter_step = 0
     num_tasks = len(data_dict)
     data_tuple = [data_loader for data_loader in data_dict.values()]
-    # data_tuple[2],data_tuple[3],data_tuple[4]
-    for data_batch in zip(data_tuple[0],data_tuple[1],data_tuple[2]):    
+    for data_batch in zip(*data_tuple):    
         step = data_iter_step // update_freq
         it = start_steps + step  
         # if lr_schedule_values is not None or wd_schedule_values is not None and data_iter_step % update_freq == 0:
@@ -270,7 +271,8 @@ def train_epoch_uni(model: torch.nn.Module, criterion: dict,
             if (data_iter_step + 1) % update_freq == 0:
                 optimizer.zero_grad()
 
-        torch.cuda.synchronize()    
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()    
         data_iter_step += 1
         min_lr,max_lr = 10., 0.
         for group in optimizer.param_groups:

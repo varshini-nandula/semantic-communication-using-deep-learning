@@ -47,10 +47,8 @@ def main(args):
     print("------------------------------------------------------")
     ############## Get the data and dataloader
     
-    ta_sel = ['imgc', 'vqa', 'textc']
-    # ta_sel = ['imgc']
-    # ta_sel = ['textc']
-    # ta_sel = ['vqa']
+    ta_sel = [t.strip() for t in args.ta_sel.split(',') if t.strip()] if args.ta_sel else ['imgc', 'textc']
+    print(f"[*] Selected Tasks for Training: {ta_sel}")
     trainset_group = build_dataset_train(is_train=True, ta_sel=ta_sel, args=args)
     trainloader_group = build_dataloader(ta_sel,trainset_group, args=args)
 
@@ -101,9 +99,8 @@ def main(args):
     criterion_train = sel_criterion_train(args,ta_sel, device)
     criterion_test = sel_criterion_test(args, device)
     
-    criterion_train['vqa'] = DiffPruningLoss(criterion_train['vqa'])
-    criterion_train['imgc'] = DiffPruningLoss(criterion_train['imgc'])
-    criterion_train['textc'] = DiffPruningLoss(criterion_train['textc'])
+    for task_name in list(criterion_train.keys()):
+        criterion_train[task_name] = DiffPruningLoss(criterion_train[task_name])
     # 
     ################################## Auto load the model in the model record folder
     if args.eval:

@@ -1,4 +1,5 @@
 import argparse
+import torch
 
 IMGC_NUMCLASS = 10   # CIFAR Data
 IMGR_LENGTH = 48   # CIFAR Data patch4/48   patch2/12
@@ -58,7 +59,7 @@ def get_args():
     parser.add_argument('--model_prefix', default='', type=str)    
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
-    parser.add_argument('--device', default='cuda',
+    parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu',
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=100, type=int)
     parser.add_argument('--resume', default='', help='resume from checkpoint')
@@ -93,6 +94,8 @@ def get_args():
 
     parser.add_argument('--ta_perform', default='', choices=['imgc','textc', 'vqa', 'imgr', 'textr', 'msa'],
                         type=str, help='Eval Data')
+    parser.add_argument('--ta_sel', default='imgc,textc', type=str,
+                        help='Comma-separated task list for multi-task training (e.g. imgc,textc)')
 
 
     return parser.parse_args()
