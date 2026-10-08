@@ -45,9 +45,10 @@ class UDeepSC(nn.Module):
         bert_ckpt = bert_model_map.get(mode, f"bert-{mode}")
         
         
-        self.spe_encoder = SPTEncoder(in_chans=encoder_in_chans,num_classes=encoder_num_classes, embed_dim=speech_embed_dim,
-                                depth=speech_encoder_depth,num_heads=encoder_num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias,drop_rate=drop_rate, 
-                                drop_path_rate=drop_path_rate,norm_layer=norm_layer, init_values=init_values,
+        self.spe_encoder = SPTEncoder_FSM(num_mels=80, max_time_steps=128, in_chans=encoder_in_chans,
+                                num_classes=encoder_num_classes, embed_dim=speech_embed_dim,
+                                depth=speech_encoder_depth, num_heads=4, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop_rate=drop_rate, 
+                                drop_path_rate=drop_path_rate, norm_layer=norm_layer, init_values=init_values,
                                 use_learnable_pos_emb=use_learnable_pos_emb)
         
         if mode=='tiny':
@@ -84,6 +85,7 @@ class UDeepSC(nn.Module):
         self.task_dict['vqa'] = nn.Embedding(25, decoder_embed_dim)
         self.task_dict['msa']  = nn.Embedding(25, decoder_embed_dim)
         self.task_dict['textr'] = nn.Embedding(66, decoder_embed_dim)
+        self.task_dict['sper'] = nn.Embedding(128, decoder_embed_dim)
 
 
         self.head = nn.ModuleDict()
@@ -93,6 +95,7 @@ class UDeepSC(nn.Module):
         self.head['vqa']   = nn.Linear(decoder_embed_dim, VQA_NUMCLASS)
         self.head['imgr']  = nn.Linear(decoder_embed_dim, IMGR_LENGTH)
         self.head['msa']   = nn.Linear(decoder_embed_dim, MSA_NUMCLASS)
+        self.head['sper']  = nn.Linear(decoder_embed_dim, 80)
 
         
         self.codebook = nn.ModuleDict()
@@ -152,28 +155,37 @@ class UDeepSC(nn.Module):
         codebook_loss['spe'] = torch.tensor(0.)
 
         ######  Compute the encoder and mapping pof codebook
-        if ta_perform.startswith('textc'):
-            # print(x_text.shape)
+        if ta_perform.startswith('text'):
             x_text, m_dict['text'], rho_dict['text'] = self.text_encoder(text, ta_perform, noise_std)
             x_text, codebook_loss['text'] = self.codebook['text'](x_text, noise_snr)
             x_text = self.text_channel_to_decoder(x_text) 
-        elif ta_perform.startswith('imgc'):
+        elif ta_perform.startswith('img'):
             x_img, m_dict['img'], rho_dict['img'] = self.img_encoder(img, ta_perform, noise_std)
             x_img, codebook_loss['img'] = self.codebook['img'](x_img, noise_snr)
             x_img = self.img_channel_to_decoder(x_img)
+        elif ta_perform.startswith('spe'):
+            x_spe, m_dict['spe'], rho_dict['spe'] = self.spe_encoder(speech, ta_perform, noise_std)
+            x_spe, codebook_loss['spe'] = self.codebook['spe'](x_spe, noise_snr)
+            x_spe = self.spe_channel_to_decoder(x_spe)
         elif ta_perform.startswith('vqa'):
-        
-            x_text, m_dict['text'], rho_dict['text'] = self.text_encoder(text, ta_perform,noise_std)
+            x_text, m_dict['text'], rho_dict['text'] = self.text_encoder(text, ta_perform, noise_std)
             x_text, codebook_loss['text'] = self.codebook['text'](x_text, noise_snr)
             x_text = self.text_channel_to_decoder(x_text) 
             x_img, m_dict['img'], rho_dict['img'] = self.img_encoder(img, ta_perform, noise_std)
             x_img, codebook_loss['img'] = self.codebook['img'](x_img, noise_snr)
             x_img = self.img_channel_to_decoder(x_img)
-        if speech is not None:
-            x_spe, m_dict['spe'], rho_dict['spe'] = self.spe_encoder(speech, ta_perform)
-            x_spe = x_spe[:,0:-1,:]
-            x_spe, codebook_loss['spe'] = self.codebook['spe'](x_spe, noise_snr)
-            x_spe = self.spe_channel_to_decoder(x_spe)
+        elif ta_perform.startswith('msa'):
+            x_text, m_dict['text'], rho_dict['text'] = self.text_encoder(text, ta_perform, noise_std)
+            x_text, codebook_loss['text'] = self.codebook['text'](x_text, noise_snr)
+            x_text = self.text_channel_to_decoder(x_text) 
+            x_img, m_dict['img'], rho_dict['img'] = self.img_encoder(img, ta_perform, noise_std)
+            x_img, codebook_loss['img'] = self.codebook['img'](x_img, noise_snr)
+            x_img = self.img_channel_to_decoder(x_img)
+            if speech is not None:
+                x_spe, m_dict['spe'], rho_dict['spe'] = self.spe_encoder(speech, ta_perform, noise_std)
+                x_spe = x_spe[:, 0:-1, :]
+                x_spe, codebook_loss['spe'] = self.codebook['spe'](x_spe, noise_snr)
+                x_spe = self.spe_channel_to_decoder(x_spe)
             
  
         #######  Compute the policy vectors    
@@ -189,6 +201,12 @@ class UDeepSC(nn.Module):
                 cls_m = torch.ones(x.shape[0], 1, 1, dtype=x.dtype, device=x.device) 
                 curr_m = m_dict['text'][-1]
                 policy = torch.cat([cls_m, curr_m], dim=1)
+        elif ta_perform.startswith('spe'):
+            x = x_spe
+            if self.training:
+                cls_m = torch.ones(x.shape[0], 1, 1, dtype=x.dtype, device=x.device) 
+                curr_m = m_dict['spe'][-1]
+                policy = torch.cat([cls_m, curr_m], dim=1)
         elif ta_perform.startswith('vqa'):
             x = torch.cat([x_img, x_text], dim=1)
             if self.training:
@@ -199,7 +217,7 @@ class UDeepSC(nn.Module):
                 policy_img = torch.cat([cls_m, curr_m_img], dim=1)
                 policy = torch.cat([policy_img, policy_text], dim=1)
         elif ta_perform.startswith('msa'):
-            x = torch.cat([x_img,x_text,x_spe], dim=1)
+            x = torch.cat([x_img, x_text, x_spe], dim=1)
             if self.training:
                 cls_m = torch.ones(x.shape[0], 1, 1, dtype=x.dtype, device=x.device) 
                 curr_m_text = m_dict['text'][-1]
@@ -214,7 +232,7 @@ class UDeepSC(nn.Module):
 
         query_embed = self.task_dict[ta_perform].weight.unsqueeze(0).repeat(x.shape[0], 1, 1)
         x = self.decoder(query_embed, x, policy, None, None) if self.training else self.decoder(query_embed, x, None, None, None)
-        if ta_perform.startswith('textr'): 
+        if ta_perform.startswith('textr') or ta_perform.startswith('sper') or ta_perform.startswith('imgr'): 
             x = self.head[ta_perform](x)
         else:
             x = self.head[ta_perform](x.mean(1))

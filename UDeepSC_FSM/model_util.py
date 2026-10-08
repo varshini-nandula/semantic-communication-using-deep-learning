@@ -594,11 +594,13 @@ class ViTEncoder_FSM(nn.Module):
          
         self.FSM_Dict = nn.ModuleDict({
             'imgc': nn.ModuleList([FSM(self.mask_num_imgc, embed_dim) for _ in range(self.num_FSM)]),
+            'imgr': nn.ModuleList([FSM(self.mask_num_imgc, embed_dim) for _ in range(self.num_FSM)]),
             'vqa': nn.ModuleList([FSM(self.mask_num_vqa, embed_dim) for _ in range(self.num_FSM)])
         })
         
         self.RHO_Dict = nn.ModuleDict({
             'imgc': rho_function(1),
+            'imgr': rho_function(1),
             'vqa': rho_function(1)
         })
         self.noise_func = nn.Sequential(nn.Linear(1,16),nn.ReLU(),nn.Linear(16,64),
@@ -731,11 +733,13 @@ class TextEncoder_FSM(nn.Module):
         
         self.FSM_Dict = nn.ModuleDict({
             'textc': nn.ModuleList([FSM(self.mask_num_textc, embed_dim) for _ in range(self.num_FSM)]),
+            'textr': nn.ModuleList([FSM(self.mask_num_textc, embed_dim) for _ in range(self.num_FSM)]),
             'vqa': nn.ModuleList([FSM(self.mask_num_vqa, embed_dim) for _ in range(self.num_FSM)])
         })
         
         self.RHO_Dict = nn.ModuleDict({
             'textc': rho_function(1),
+            'textr': rho_function(1),
             'vqa': rho_function(1)})
         self.noise_func = nn.Sequential(nn.Linear(1,16),nn.ReLU(),nn.Linear(16,64),
                         nn.ReLU(), nn.Linear(64, embed_dim//2),nn.ReLU())   
@@ -771,7 +775,7 @@ class TextEncoder_FSM(nn.Module):
             x = self.blocks[d](x)
         m_group = []                
         device, batch_size = x.device, x.shape[0]
-        mask_num = self.mask_num_textc if ta_perform.startswith('text') else self.mask_num_vqa
+        mask_num = x.shape[1] - 1
         prev_m = torch.ones(batch_size, mask_num, 1, dtype=x.dtype, device=device)    
         noise_feature = self.noise_func(noise_std)
         
@@ -873,17 +877,151 @@ class FSM(nn.Module):
         else:
           
             prob_kept = prob[:,:,0]    # Obtain the first one
-            # prob_kept = torch.randn(prob_kept.shape).cuda()
-            num_kept = int(np.round(self.mask_num * ratio))
+            num_kept = max(1, int(np.round(prev_m.shape[1] * ratio)))
             curr_m = F.gumbel_softmax(prob, hard=True)[:, :, 0:1] * prev_m
             keep_index = torch.argsort(prob_kept, dim=1, descending=True)[:, :num_kept]    
-            print(keep_index[0])
             skip_index = torch.zeros(batch_size, num_skip, dtype=keep_index.dtype, device=keep_index.device)
             full_m = torch.cat([skip_index, keep_index + num_skip], dim=1)
             input_feature = batch_index_select(input_feature, full_m)
             curr_m = batch_index_select(prev_m, keep_index)
           
             return input_feature, curr_m
+
+
+class SPTEncoder_FSM(nn.Module):
+    """ Speech Transformer with Feature Selection Module (FSM)
+        Takes mel-spectrogram [B, T, num_mels=80] and maps to deep embeddings,
+        applying dynamic channel-adaptive token pruning.
+    """
+    def __init__(self, num_mels=80, max_time_steps=128, in_chans=1, num_classes=0, embed_dim=128, depth=4,
+                 num_heads=4, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
+                 drop_path_rate=0., norm_layer=nn.LayerNorm, init_values=None,
+                 use_learnable_pos_emb=False, num_FSM=2):
+        super().__init__()
+        self.num_features = self.embed_dim = embed_dim
+        self.depth = depth
+        self.max_time_steps = max_time_steps
+        self.num_mels = num_mels
+        self.num_FSM = num_FSM
+
+        # Ensure num_heads divides embed_dim evenly
+        if embed_dim % num_heads != 0:
+            for h in [4, 8, 2, 1]:
+                if embed_dim % h == 0:
+                    num_heads = h
+                    break
+
+        # Linear projection of each mel-spectrogram time frame [B, T, 80] -> [B, T, embed_dim]
+        self.linear_embed = nn.Linear(num_mels, embed_dim)
+
+        self.cls_token = nn.ParameterDict({
+            'sper': nn.Parameter(torch.zeros(1, 1, embed_dim)),
+            'msa': nn.Parameter(torch.zeros(1, 1, embed_dim))
+        })
+        self.task_embedd = nn.ParameterDict({
+            'sper': nn.Parameter(torch.zeros(1, 1, embed_dim)),
+            'msa': nn.Parameter(torch.zeros(1, 1, embed_dim))
+        })
+
+        if use_learnable_pos_emb:
+            self.pos_embed = nn.Parameter(torch.zeros(1, max_time_steps + 1, embed_dim))
+        else:
+            self.pos_embed = get_sinusoid_encoding_table(max_time_steps + 1, embed_dim)
+
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
+        self.blocks = nn.ModuleList([
+            Block(
+                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer)
+            for i in range(depth)])
+        self.norm = norm_layer(embed_dim)
+
+        if use_learnable_pos_emb:
+            trunc_normal_(self.pos_embed, std=.02)
+        for key in self.cls_token.keys():
+            trunc_normal_(self.cls_token[key], std=.02)
+            trunc_normal_(self.task_embedd[key], std=.02)
+        self.apply(self._init_weights)
+
+        self.mask_num_sper = max_time_steps + 1
+        self.FSM_Dict = nn.ModuleDict({
+            'sper': nn.ModuleList([FSM(self.mask_num_sper, embed_dim) for _ in range(self.num_FSM)])
+        })
+        self.RHO_Dict = nn.ModuleDict({
+            'sper': rho_function(1)
+        })
+        self.noise_func = nn.Sequential(
+            nn.Linear(1, 16), nn.ReLU(),
+            nn.Linear(16, 64), nn.ReLU(),
+            nn.Linear(64, embed_dim // 2), nn.ReLU()
+        )
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    def get_num_layers(self):
+        return len(self.blocks)
+
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        return {'pos_embed', 'cls_token'}
+
+    def forward(self, x, ta_perform, noise_std=None):
+        batch_size = x.shape[0]
+        device = x.device
+        x = self.linear_embed(x)
+        T = x.shape[1]
+
+        cls_key = ta_perform if ta_perform in self.cls_token else 'sper'
+        cls_tokens = self.cls_token[cls_key].expand(batch_size, -1, -1).to(device)
+        task_embedd = self.task_embedd[cls_key].expand(batch_size, -1, -1).to(device)
+
+        x = torch.cat((cls_tokens, x), dim=1)
+
+        if isinstance(self.pos_embed, nn.Parameter):
+            pos = self.pos_embed[:, :T+1, :]
+        else:
+            pos = self.pos_embed[:, :T+1, :].type_as(x).to(device).clone().detach()
+        x = x + pos
+        x = torch.cat((x, task_embedd), dim=1)
+
+        for d in range(self.depth - self.num_FSM):
+            x = self.blocks[d](x)
+
+        if ta_perform in self.FSM_Dict:
+            m_group = []
+            mask_num = x.shape[1] - 1
+            prev_m = torch.ones(batch_size, mask_num, 1, dtype=x.dtype, device=device)
+            if noise_std is None:
+                noise_std = torch.tensor([0.1], device=device)
+            noise_feature = self.noise_func(noise_std)
+            rho = self.RHO_Dict[ta_perform](noise_std)
+            rho_list = [rho**(i+1) for i in range(self.num_FSM)]
+            for d in range(self.depth - self.num_FSM, self.depth):
+                index = d - self.depth + self.num_FSM
+                x, curr_m = self.FSM_Dict[ta_perform][index](x, noise_feature, prev_m, num_skip=1, ratio=rho_list[index])
+                if self.training:
+                    m_group.append(curr_m)
+                    cls_m = torch.ones(batch_size, 1, 1, dtype=x.dtype, device=device)
+                    policy = torch.cat([cls_m, curr_m], dim=1)
+                    x = self.blocks[d](x, policy)
+                else:
+                    x = self.blocks[d](x)
+                prev_m = curr_m
+            x = self.norm(x)
+            return x, m_group, rho_list
+        else:
+            for d in range(self.depth - self.num_FSM, self.depth):
+                x = self.blocks[d](x)
+            x = self.norm(x)
+            return x, [], []
+
 
 
 
