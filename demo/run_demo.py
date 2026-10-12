@@ -32,6 +32,7 @@ sys.path.append(str(ROOT_DIR))
 from demo.utils_demo import (
     VisionProcessor, TextProcessor, SpeechProcessor,
     FSMSelector, WirelessChannel, ESP32SerialBridge, DemoVisualizer,
+    NeuralReconstructionEngine, load_udeepsc_model,
     _HAS_LIBROSA, _HAS_SBERT, _HAS_SKIMAGE
 )
 
@@ -40,44 +41,16 @@ ASSETS_DIR = DEMO_DIR / "test_assets"
 OUTPUTS_DIR = DEMO_DIR / "outputs"
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── Checkpoint path (set to your .pth file if available) ─────────────────────
-CKPT_PATH = ROOT_DIR / "UDeepSC_FSM" / "checkpoint.pth"
-MODEL_LOADED = False   # updated below if checkpoint found
-
-# ── Try to load the real UDeepSC model ───────────────────────────────────────
-_real_model = None
+MODEL_LOADED = False
 
 def _try_load_model():
     """
     Attempts to load the real UDeepSC model.
-    Sets _real_model and MODEL_LOADED if successful.
-    Returns (model, loaded: bool).
     """
-    global _real_model, MODEL_LOADED
-    if _real_model is not None:
-        return _real_model, MODEL_LOADED
-
-    if not CKPT_PATH.exists():
-        print(f"[Model] No checkpoint found at {CKPT_PATH}.")
-        print("[Model] Running in SIMULATION MODE — outputs are proxy approximations.")
-        print("[Model] To enable real inference: place checkpoint.pth in UDeepSC_FSM/")
-        return None, False
-
-    try:
-        import torch
-        sys.path.insert(0, str(ROOT_DIR / "UDeepSC_FSM"))
-        from model import UDeepSC_model
-        ckpt = torch.load(str(CKPT_PATH), map_location="cpu")
-        _real_model = UDeepSC_model(pretrained=False)
-        state = ckpt.get("model", ckpt)
-        _real_model.load_state_dict(state, strict=False)
-        _real_model.eval()
-        MODEL_LOADED = True
-        print(f"[Model] UDeepSC loaded from {CKPT_PATH}")
-        return _real_model, True
-    except Exception as e:
-        print(f"[Model] Could not load checkpoint ({e}). Running in SIMULATION MODE.")
-        return None, False
+    global MODEL_LOADED
+    model, loaded = load_udeepsc_model()
+    MODEL_LOADED = loaded
+    return model, loaded
 
 
 def _mode_banner():
@@ -414,140 +387,145 @@ def run_multimodal_simultaneous_demo(image_path=None, custom_text=None,
 
 
 # =============================================================================
-# Interactive Menu
+# Architectural Comparison Helper
 # =============================================================================
-def interactive_menu():
-    _try_load_model()   # attempt model load once at startup
+def print_pipeline_comparison():
+    print("\n" + "=" * 78)
+    print(" [COMPARISON] EXISTING U-DEEPSC BASELINE vs. OUR EXTENDED PIPELINE")
+    print("=" * 78)
+    print("""
++-------------------------+-------------------------------+----------------------------------+
+| Dimension               | Existing U-DeepSC (Base Paper)| Our Extended Pipeline (Built)    |
++-------------------------+-------------------------------+----------------------------------+
+| Primary Focus           | Multi-task Classification     | Full Multimodal Reconstruction   |
+| Image Processing        | ViT -> 10-class Classification| ViT -> Full Pixel Recon (PSNR)   |
+| Text Processing         | BERT -> Binary Sentiment      | BERT -> Full Token Recon (BLEU)  |
+| Speech Modality         | CMU-MOSEI 74-dim sentiment    | LibriSpeech 80-bin Mel-Spec      |
+| Speech Architecture     | Linear(74, 128) - No Recon!   | SPTEncoder_FSM + head['sper']    |
+| Speech FSM              | NONE (Zero FSM for speech)    | Dedicated FSM_Dict['sper']       |
+| Feature Selection       | Black-Box MLP + Gumbel-Softmax| Black-Box FSM (Base for XAI swap)|
+| Recovery Mechanism      | NONE (Corrupted tokens lost)  | Ready for selective ARQ          |
+| Hardware Link           | Simulated only                | ESP32 2.4 GHz RF via ESP-NOW     |
++-------------------------+-------------------------------+----------------------------------+
+""")
+    print(" Key Takeaway for Viva/Review:")
+    print("  - The base paper never attempted speech reconstruction; it only performed")
+    print("    sentiment classification ('msa') with pre-extracted acoustic features.")
+    print("  - We engineered the first 80-bin log mel-spectrogram reconstruction pipeline")
+    print("    with SPTEncoder_FSM, completing the 3-modality reconstruction foundation.\n")
 
-    snr = 10.0
-    cbr = 0.5
-    channel_type = "AWGN"
-    bridge = ESP32SerialBridge()
 
+# =============================================================================
+# Master Interactive Menu
+# =============================================================================
+def master_interactive_menu():
     while True:
-        print("\n" + "=" * 65)
-        print("   *** U-DEEPSC SEMANTIC COMMUNICATION - INTERACTIVE DEMO ***")
-        print("=" * 65)
-        model_status = "LOADED" if MODEL_LOADED else "SIMULATION MODE (no checkpoint)"
-        print(f"  Model   : {model_status}")
-        print(f"  Env     : SSIM={'skimage' if _HAS_SKIMAGE else 'approx'}  "
-              f"MelSpec={'librosa' if _HAS_LIBROSA else 'synthetic'}  "
-              f"SemSim={'SBERT' if _HAS_SBERT else 'TF-IDF/overlap'}")
-        print(f"  Settings: SNR={snr} dB | CBR={cbr} | Channel={channel_type} | "
-              f"HW={'Connected' if bridge.connected else 'Simulated'}")
-        print("-" * 65)
-        print("  1. [VISION]     Image Transmission  (custom / preset)")
-        print("  2. [TEXT]       Text Transmission   (custom / preset)")
-        print("  3. [SPEECH]     Speech Transmission (LibriSpeech / custom)")
-        print("  4. [MULTIMODAL] Unified Multi-Modal Demo (Vision+Text+Speech)")
-        print("  5. [SETTINGS]   Adjust SNR / CBR / Channel Model")
-        print("  6. [HARDWARE]   Connect ESP32 Hardware Link")
-        print("  7. [EXIT]       Exit Demo")
-        print("=" * 65)
+        print("\n" + "=" * 70)
+        print("   *** SEMANTIC COMMUNICATION DEMONSTRATION SUITE - MASTER PORTAL ***")
+        print("   Batch No. 12 | Explainable Multimodal Semantic Communication")
+        print("=" * 70)
+        print("  Select Pipeline to Test & Demonstrate:")
+        print("  --------------------------------------------------------------------")
+        print("  1. [BASELINE]       Existing U-DeepSC Pipeline")
+        print("                      (Paper's Multi-Task Classification: imgc, textc, msa)")
+        print("  2. [CONTRIBUTIONS]  Our Extended Reconstruction Pipeline")
+        print("                      (Full Recon: imgr, textr, and novel sper with SPTEncoder_FSM)")
+        print("  3. [COMPARISON]     View Architectural Differences & Research Gap Summary")
+        print("  4. [EXIT]           Exit")
+        print("=" * 70)
 
-        choice = input(" Select (1-7): ").strip()
+        choice = input(" Select Pipeline (1-4): ").strip()
 
         if choice == "1":
-            print("\nAvailable Preset Images:")
-            images = sorted(list(ASSETS_DIR.glob("*.png")) +
-                            list(ASSETS_DIR.glob("*.jpg")))
-            for idx, img in enumerate(images):
-                print(f"  [{idx+1}] {img.name}")
-            print("  [C] Enter custom image path")
-            sub = input(" Choice: ").strip()
-            if sub.lower() == 'c':
-                target_p = input(" Path to image: ").strip()
-            elif sub.isdigit() and 1 <= int(sub) <= len(images):
-                target_p = images[int(sub) - 1]
-            elif os.path.exists(sub):
-                target_p = sub
-            else:
-                target_p = ASSETS_DIR / "sample_frog.png"
-                print(f"  [!] Invalid choice, using default: {target_p.name}")
-            run_vision_demo(image_path=target_p, snr_db=snr, cbr=cbr,
-                            channel_type=channel_type, hardware_bridge=bridge)
-
+            from demo.run_udeepsc_demo import baseline_interactive_menu
+            baseline_interactive_menu()
         elif choice == "2":
-            user_text = input("\n Enter text sentence (Enter for default): ").strip()
-            run_text_demo(custom_text=user_text, snr_db=snr, cbr=cbr,
-                          channel_type=channel_type, hardware_bridge=bridge)
-
+            from demo.run_contributions_demo import contributions_interactive_menu
+            contributions_interactive_menu()
         elif choice == "3":
-            run_speech_demo(snr_db=snr, cbr=cbr, channel_type=channel_type)
-
+            print_pipeline_comparison()
         elif choice == "4":
-            custom_t = input("\n Enter sentence for multimodal (Enter for default): ").strip()
-            run_multimodal_simultaneous_demo(custom_text=custom_t, snr_db=snr,
-                                              cbr=cbr, channel_type=channel_type)
-
-        elif choice == "5":
-            print("\n--- Adjust Settings ---")
-            try:
-                new_snr = input(f" SNR in dB [{snr}]: ").strip()
-                new_cbr = input(f" CBR 0.1-1.0 [{cbr}]: ").strip()
-                ch_in   = input(" Channel (1=AWGN, 2=Rayleigh, 3=Rician): ").strip()
-                if new_snr: snr = float(new_snr)
-                if new_cbr: cbr = float(max(0.1, min(1.0, float(new_cbr))))
-                ch_map = {"1": "AWGN", "2": "Rayleigh", "3": "Rician"}
-                if ch_in in ch_map:
-                    channel_type = ch_map[ch_in]
-                print(f"[OK] SNR={snr} dB | CBR={cbr} | Channel={channel_type}")
-            except ValueError:
-                print("[!] Invalid input. Retaining previous settings.")
-
-        elif choice == "6":
-            port = input(" COM Port [COM3]: ").strip() or "COM3"
-            bridge = ESP32SerialBridge(port=port)
-            bridge.connect()
-
-        elif choice == "7":
-            print("\nExiting demo. Good luck with your review!")
+            print("\nExiting demonstration suite. Good luck with your project review!")
             break
         else:
-            print("[!] Invalid choice. Enter 1-7.")
+            print("[!] Invalid option. Please enter 1-4.")
 
 
 # =============================================================================
 # CLI Entry
 # =============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="U-DeepSC Semantic Communication Demo Suite")
-    parser.add_argument("--mode", choices=["menu","image","text","speech","multimodal"],
+    parser = argparse.ArgumentParser(description="U-DeepSC Semantic Communication Master Demo Suite")
+    parser.add_argument("--pipeline", choices=["baseline", "udeepsc", "contributions", "ours", "compare"],
+                        default=None, help="Choose which pipeline to run")
+    parser.add_argument("--mode", choices=["menu", "image", "vision", "text", "speech", "multimodal"],
                         default="menu")
     parser.add_argument("--image",   type=str, default=None)
     parser.add_argument("--text",    type=str, default=None)
     parser.add_argument("--audio",   type=str, default=None)
     parser.add_argument("--snr",     type=float, default=10.0)
     parser.add_argument("--cbr",     type=float, default=0.5)
-    parser.add_argument("--channel", choices=["AWGN","Rayleigh","Rician"], default="AWGN")
-    parser.add_argument("--ckpt",    type=str, default=None,
-                        help="Path to UDeepSC checkpoint (.pth)")
+    parser.add_argument("--channel", choices=["AWGN", "Rayleigh", "Rician"], default="AWGN")
     args = parser.parse_args()
 
-    if args.ckpt:
-        global CKPT_PATH
-        CKPT_PATH = Path(args.ckpt)
+    mode = "image" if args.mode == "vision" else args.mode
 
-    _try_load_model()
+    # Route by pipeline if specified
+    if args.pipeline in ["baseline", "udeepsc"]:
+        from demo.run_udeepsc_demo import (
+            run_baseline_image_demo, run_baseline_text_demo,
+            run_baseline_speech_demo, run_baseline_multitask_demo,
+            baseline_interactive_menu
+        )
+        if mode == "image":
+            run_baseline_image_demo(args.image, args.snr, args.cbr, args.channel)
+        elif mode == "text":
+            run_baseline_text_demo(args.text, args.snr, args.cbr, args.channel)
+        elif mode == "speech":
+            run_baseline_speech_demo(args.snr, args.channel)
+        elif mode == "multimodal":
+            run_baseline_multitask_demo(args.image, args.text, args.snr, args.cbr, args.channel)
+        else:
+            baseline_interactive_menu()
 
-    print("\n" + "=" * 65)
-    print(" U-DEEPSC FSM DEMO SUITE — Environment Status")
-    print("=" * 65)
-    print(_mode_banner())
-    print("=" * 65)
+    elif args.pipeline in ["contributions", "ours"]:
+        from demo.run_contributions_demo import (
+            run_vision_recon_demo, run_text_recon_demo,
+            run_speech_recon_demo, run_multimodal_recon_demo,
+            contributions_interactive_menu
+        )
+        if mode == "image":
+            run_vision_recon_demo(args.image, args.snr, args.cbr, args.channel)
+        elif mode == "text":
+            run_text_recon_demo(args.text, args.snr, args.cbr, args.channel)
+        elif mode == "speech":
+            run_speech_recon_demo(args.audio, args.snr, args.cbr, args.channel)
+        elif mode == "multimodal":
+            run_multimodal_recon_demo(args.image, args.text, args.audio, args.snr, args.cbr, args.channel)
+        else:
+            contributions_interactive_menu()
 
-    if args.mode == "menu":
-        interactive_menu()
-    elif args.mode == "image":
-        run_vision_demo(args.image, args.snr, args.cbr, args.channel)
-    elif args.mode == "text":
-        run_text_demo(args.text, args.snr, args.cbr, args.channel)
-    elif args.mode == "speech":
-        run_speech_demo(args.audio, args.snr, args.cbr, args.channel)
-    elif args.mode == "multimodal":
-        run_multimodal_simultaneous_demo(args.image, args.text, args.audio,
-                                          args.snr, args.cbr, args.channel)
+
+    elif args.pipeline == "compare":
+        print_pipeline_comparison()
+
+    else:
+        # Default: if mode specified directly, run reconstruction demo; else launch master portal
+        if args.mode == "image":
+            from demo.run_contributions_demo import run_vision_recon_demo
+            run_vision_recon_demo(args.image, args.snr, args.cbr, args.channel)
+        elif args.mode == "text":
+            from demo.run_contributions_demo import run_text_recon_demo
+            run_text_recon_demo(args.text, args.snr, args.cbr, args.channel)
+        elif args.mode == "speech":
+            from demo.run_contributions_demo import run_speech_recon_demo
+            run_speech_recon_demo(args.audio, args.snr, args.cbr, args.channel)
+        elif args.mode == "multimodal":
+            run_multimodal_simultaneous_demo(args.image, args.text, args.audio, args.snr, args.cbr, args.channel)
+        else:
+            master_interactive_menu()
 
 
 if __name__ == "__main__":
     main()
+

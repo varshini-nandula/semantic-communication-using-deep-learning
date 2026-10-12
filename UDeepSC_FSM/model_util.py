@@ -877,7 +877,8 @@ class FSM(nn.Module):
         else:
           
             prob_kept = prob[:,:,0]    # Obtain the first one
-            num_kept = max(1, int(np.round(prev_m.shape[1] * ratio)))
+            ratio_val = float(ratio.detach().cpu().item()) if torch.is_tensor(ratio) else float(ratio)
+            num_kept = max(1, int(np.round(prev_m.shape[1] * ratio_val)))
             curr_m = F.gumbel_softmax(prob, hard=True)[:, :, 0:1] * prev_m
             keep_index = torch.argsort(prob_kept, dim=1, descending=True)[:, :num_kept]    
             skip_index = torch.zeros(batch_size, num_skip, dtype=keep_index.dtype, device=keep_index.device)
