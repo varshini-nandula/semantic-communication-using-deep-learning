@@ -7,7 +7,7 @@ import torch.utils.data as data
 
 
 from transformers import BertTokenizer
-from data import CIFAR_CR,SST_CR
+from data import CIFAR_CR, SST_CR, LibriSpeech_CR
 from timm.data import create_transform
 from vqa_utils import VQA2, Config_VQA
 from torch.nn.utils.rnn import pad_sequence
@@ -119,6 +119,10 @@ def build_dataset_test(is_train, args):
         config_msa = Config_MSA()
         dataset = MSA(config_msa, train=is_train)
     
+    elif args.ta_perform.startswith('sper'):
+        speech_path = getattr(args, 'speech_data_path', getattr(args, 'data_path', 'data/'))
+        dataset = LibriSpeech_CR(root=speech_path, train=is_train, if_class=False)
+    
     else:
         raise NotImplementedError()
 
@@ -160,6 +164,10 @@ def build_dataset_train(is_train, ta_sel, args):
         elif ta.startswith('msa'):
             config_msa = Config_MSA()
             dataset = MSA(config_msa, train=is_train)
+        
+        elif ta.startswith('sper'):
+            speech_path = getattr(args, 'speech_data_path', getattr(args, 'data_path', 'data/'))
+            dataset = LibriSpeech_CR(root=speech_path, train=is_train, if_class=False)
         
         else:
             raise NotImplementedError()

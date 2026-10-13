@@ -92,10 +92,12 @@ def get_args():
     parser.add_argument('--save_ckpt', action='store_true')
     parser.set_defaults(save_ckpt=True)
 
-    parser.add_argument('--ta_perform', default='', choices=['imgc','textc', 'vqa', 'imgr', 'textr', 'msa'],
+    parser.add_argument('--speech_data_path', default='', type=str,
+                        help='path to LibriSpeech speech dataset')
+    parser.add_argument('--ta_perform', default='', choices=['imgc','textc', 'vqa', 'imgr', 'textr', 'msa', 'sper'],
                         type=str, help='Eval Data')
     parser.add_argument('--ta_sel', default='imgc,textc', type=str,
-                        help='Comma-separated task list for multi-task training (e.g. imgc,textc)')
+                        help='Comma-separated task list for multi-task training (e.g. imgc,textc,sper)')
 
 
     return parser.parse_args()
