@@ -44,6 +44,9 @@ def sel_criterion_train(args, ta_sel, device):
         elif ta.startswith('msa'):
             criterion = torch.nn.MSELoss().to(device)
             print("criterion for %s Reconstruction = %s" % (args.ta_perform,str(criterion)))
+        elif ta.startswith('sper'):
+            criterion = torch.nn.MSELoss().to(device)
+            print("criterion for %s Reconstruction = %s" % (ta, str(criterion)))
         criterion_group[ta] = criterion
     return criterion_group
 
@@ -65,6 +68,9 @@ def sel_criterion_test(args,device):
         criterion = torch.nn.BCELoss(reduction='sum').to(device)
         print("criterion for %s classification = %s" % (args.ta_perform,str(criterion)))
     elif args.ta_perform.startswith('msa'):
+        criterion = torch.nn.MSELoss().to(device)
+        print("criterion for %s Reconstruction = %s" % (args.ta_perform,str(criterion)))
+    elif args.ta_perform.startswith('sper'):
         criterion = torch.nn.MSELoss().to(device)
         print("criterion for %s Reconstruction = %s" % (args.ta_perform,str(criterion)))
     return criterion
@@ -763,6 +769,17 @@ class DiffPruningLoss(torch.nn.Module):
                 # self.rho_weight * rho_dict['text'][-1] * 0.4 + \
                 # self.mask_weight * mask_loss
             rho_text = rho_dict['text'][-1]
+        
+        elif ta_perform.startswith('spe'):
+            for i, mask_m in enumerate(m_dict.get('spe', [])):
+                mask_m = mask_m.squeeze(2)
+                keep_ratio_spe = mask_m.mean(1)
+                surp_loss = surp_loss + ((keep_ratio_spe - rho_dict['spe'][i]) ** 2).mean()
+                mask_loss = mask_loss + keep_ratio_spe.mean()
+            main_loss = self.base_criterion(pred, labels)
+            loss = self.main_weight * main_loss + \
+                self.surp_weight * surp_loss + \
+                self.codebook_weight * codebook_loss
         
        
         # loss = self.clf_weight * cls_loss + vq_loss

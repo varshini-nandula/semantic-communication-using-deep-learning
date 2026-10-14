@@ -25,9 +25,9 @@ def evaluate(ta_perform: str, net: torch.nn.Module, dataloader: Iterable,
     
     for snr in range(-6,10,1):
         noise_std = torch.FloatTensor([1]) * 10**(-snr/20)
-        if 'imgc' in net.img_encoder.RHO_Dict:
+        if hasattr(net, 'img_encoder') and hasattr(net.img_encoder, 'RHO_Dict') and 'imgc' in net.img_encoder.RHO_Dict:
             print(net.img_encoder.RHO_Dict['imgc'](noise_std.to(device)))
-        if 'textc' in net.text_encoder.RHO_Dict:
+        if hasattr(net, 'text_encoder') and hasattr(net.text_encoder, 'RHO_Dict') and 'textc' in net.text_encoder.RHO_Dict:
             print(net.text_encoder.RHO_Dict['textc'](noise_std.to(device)))
     if ta_perform.startswith('imgc'):
         acc_meter = AverageMeter()
@@ -106,6 +106,31 @@ def evaluate(ta_perform: str, net: torch.nn.Module, dataloader: Iterable,
         test_stat = {'loss': loss_meter.avg,
             'acc': acc_meter.avg}  
         return test_stat
+    
+    elif ta_perform.startswith('sper'):
+        loss_meter = AverageMeter()
+        psnr_meter = AverageMeter()
+        with torch.no_grad():
+            for batch_idx, (speeches, targets) in enumerate(dataloader):
+                speeches, targets = speeches.to(device), targets.to(device)
+                outputs_dict = net(speech=speeches, ta_perform=ta_perform, test_snr=test_snr)
+                outputs = outputs_dict['outputs']
+                rho = outputs_dict['rho']['spe']
+                loss = criterion(outputs, targets)
+                batch_size = targets.shape[0]
+
+                mse_val = torch.mean((outputs - targets) ** 2).item()
+                psnr_val = 10.0 * math.log10(4.0 / max(mse_val, 1e-10))
+
+                psnr_meter.update(psnr_val, n=batch_size)
+                loss_meter.update(loss.item(), n=batch_size)
+                if batch_idx % print_freq == 0:
+                    keep_num = int(np.round(rho[-1].item() * 128)) if hasattr(rho[-1], 'item') else 128
+                    print('Test %d/%d: [loss: %.4f] [mel_psnr: %.3f dB] [keep number: %d]' % (
+                        batch_idx * batch_size, len(dataloader.dataset), loss_meter.avg, psnr_meter.avg, keep_num))
+
+        test_stat = {'loss': loss_meter.avg, 'psnr': psnr_meter.avg}
+        return test_stat
 
 
 @torch.no_grad()
@@ -175,6 +200,9 @@ def train_class_batch_uni(ta_perform, model, sel_batch, targets, criterion):
         targets = targets[:,1:]
         for i in range(outputs.shape[1]):
             loss += criterion[ta_perform](outputs[:,i], targets[:,i], ta_perform)*5
+    elif ta_perform.startswith('sper'):
+        outputs = model(speech=speechs, ta_perform=ta_perform)
+        loss = criterion[ta_perform](outputs, targets, ta_perform) * 10
     elif ta_perform.startswith('vqa'):
         outputs = model(img=imgs, text=texts, ta_perform=ta_perform) 
         loss = criterion[ta_perform](outputs, targets, ta_perform) * 1
@@ -231,6 +259,9 @@ def train_epoch_uni(model: torch.nn.Module, criterion: dict,
             targets = data[1].to(device, non_blocking=True)
         elif ta.startswith('text'):
             texts = data[0].to(device, non_blocking=True)
+            targets = data[1].to(device, non_blocking=True)
+        elif ta.startswith('spe'):
+            speechs = data[0].to(device, non_blocking=True)
             targets = data[1].to(device, non_blocking=True)
         elif ta.startswith('vqa'):
             imgs = data[0].to(device, non_blocking=True)
@@ -291,6 +322,11 @@ def train_epoch_uni(model: torch.nn.Module, criterion: dict,
             loss_meter_dict[ta].update(loss_value, 1)
         elif ta.startswith('textr'):
             loss_meter_dict[ta].update(loss_value, 1)
+        elif ta.startswith('sper'):
+            mse_val = torch.mean((outputs - targets) ** 2).item()
+            mel_psnr = 10.0 * math.log10(4.0 / max(mse_val, 1e-10))
+            psnr_meter.update(mel_psnr, n=batch_size)
+            loss_meter_dict[ta].update(loss_value, 1)
         elif ta.startswith('vqa'):
             acc_meter_dict[ta].update((outputs.max(-1)[-1] == targets.max(-1)[-1]).float().mean().item(), n=batch_size)
             loss_meter_dict[ta].update(loss_value, 1)
@@ -315,6 +351,10 @@ def train_epoch_uni(model: torch.nn.Module, criterion: dict,
                 print('Epoch:[%d] [%s] %d/%d: [loss: %.3f] [lr: %.3e]' 
                     %(epoch, ta, batch_size*data_iter_step, num_samples,
                         loss_meter_dict[ta].avg, max_lr)) 
+            elif ta.startswith('sper'):
+                print('Epoch:[%d] [%s] %d/%d: [loss: %.3f] [mel_psnr: %.3f dB] [lr: %.3e]' 
+                    %(epoch, ta, batch_size*data_iter_step, num_samples,
+                        loss_meter_dict[ta].avg, psnr_meter.avg, max_lr))
             elif ta.startswith('vqa'):
                 print('Epoch:[%d] [%s] %d/%d: [loss: %.3f] [acc1: %.3f /100] [lr: %.3e]' 
                     %(epoch, ta, batch_size*data_iter_step, 5000,
